@@ -173,6 +173,30 @@ message ContextQuery {
   repeated ContextPair context = 1;
 }
 
+message FeedbackQuery {
+    Vector target = 1; // The original query vector.
+    repeated FeedbackPair feedback_pairs = 2; // Pairs of results with higher difference in their feedback score.
+    FeedbackFormula formula = 3; // Formula to use.
+}
+
+message FeedbackPair {
+    Vector positive = 1; // A vector with higher feedback score.
+    Vector negative = 2; // A vector with lower feedback score.
+    float confidence = 3; // Difference of feedback scores between these two vectors.
+}
+
+message FeedbackFormula {
+    oneof variant {
+        LinearFeedbackFormula linear = 1;
+    }
+}
+
+message LinearFeedbackFormula {
+    float a = 1;
+    float b = 2;
+    float c = 3;
+}
+
 message QueryEnum {
   oneof query {
     Vector nearest_neighbors = 1; // ANN
@@ -180,6 +204,7 @@ message QueryEnum {
     DiscoveryQuery discover = 3; // Search for points that get closer to a target, constrained by a context of positive and negative pairs
     ContextQuery context = 4; // Use only the context to find points that minimize loss against negative examples
     RecoQuery recommend_sum_scores = 5; // Recommend points which have the greatest sum of scores against all vectors. Positive vectors are added, negatives are subtracted.
+    FeedbackQuery feedback = 6; // Use feedback scoring to guide the search into "better" results
   }
 }
 
@@ -255,12 +280,25 @@ message RawQuery {
     repeated RawContextPair context = 1;
   }
 
+  message Feedback {
+      RawVector target = 1;
+      repeated RawFeedbackPair feedback_pairs = 2;
+      FeedbackFormula formula = 3;
+  }
+
+  message RawFeedbackPair {
+      RawVector positive = 1;
+      RawVector negative = 2;
+      float confidence = 3;
+  }
+
   oneof variant {
     RawVector nearest = 1; // ANN
     Recommend recommend_best_score = 2; // Recommend points with highest similarity to positive examples, or lowest to negative examples
     Discovery discover = 3; // Search for points that get closer to a target, constrained by a context of positive and negative pairs
     Context context = 4; // Use only the context to find points that minimize loss against negative examples
     Recommend recommend_sum_scores = 5; // Recommend points which have the greatest sum of scores against all vectors. Positive vectors are added, negatives are subtracted.
+    Feedback feedback = 6;
   }
 }
 

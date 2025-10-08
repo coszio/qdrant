@@ -14,7 +14,9 @@ use segment::types::{
     Filter, Order, ScoredPoint, SearchParams, VectorName, VectorNameBuf, WithPayloadInterface,
     WithVector,
 };
-use segment::vector_storage::query::{ContextQuery, DiscoveryQuery, RecoQuery};
+use segment::vector_storage::query::{
+    ContextQuery, DiscoveryQuery, FeedbackPair, FeedbackQuery, LinearFeedbackFormula, RecoQuery,
+};
 use serde::Serialize;
 use shard::query::query_enum::QueryEnum;
 use tonic::Status;
@@ -351,6 +353,37 @@ fn query_enum_from_grpc_raw_query(
             query: ContextQuery::try_from(context)?,
             using,
         }),
+        Variant::Feedback(feedback) => {
+            let grpc::raw_query::Feedback {
+                target,
+                feedback_pairs,
+                formula,
+            } = feedback;
+
+            let target = target
+                .map(VectorInternal::try_from)
+                .transpose()?
+                .ok_or_else(|| Status::invalid_argument("No target provided"))?;
+            let feedback_pairs = feedback_pairs
+                .into_iter()
+                .map(FeedbackPair::try_from)
+                .try_collect()?;
+            let formula = formula
+                .and_then(|f| f.variant)
+                .ok_or_else(|| Status::invalid_argument("No formula provided"))?;
+
+            match formula {
+                grpc::feedback_formula::Variant::Linear(linear_feedback_formula) => {
+                    let query = FeedbackQuery {
+                        target,
+                        feedback_pairs,
+                        formula: LinearFeedbackFormula::from(linear_feedback_formula),
+                    };
+
+                    QueryEnum::FeedbackLinear(NamedQuery { query, using })
+                }
+            }
+        }
     };
 
     Ok(query_enum)
@@ -683,6 +716,9 @@ fn query_enum_into_grpc_raw_query(query: QueryEnum) -> grpc::RawQuery {
             Variant::Discover(grpc::raw_query::Discovery::from(named.query))
         }
         QueryEnum::Context(named) => Variant::Context(grpc::raw_query::Context::from(named.query)),
+        QueryEnum::FeedbackLinear(named) => {
+            Variant::Feedback(grpc::raw_query::Feedback::from(named.query))
+        }
     };
 
     grpc::RawQuery {

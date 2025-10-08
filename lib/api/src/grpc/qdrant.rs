@@ -4262,7 +4262,6 @@ pub struct InferenceObject {
     #[prost(map = "string, message", tag = "3")]
     pub options: ::std::collections::HashMap<::prost::alloc::string::String, Value>,
 }
-/// Legacy vector format, which determines the vector type by the configuration of its fields.
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -9985,10 +9984,73 @@ pub struct ContextQuery {
     pub context: ::prost::alloc::vec::Vec<ContextPair>,
 }
 #[derive(serde::Serialize)]
+#[derive(validator::Validate)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FeedbackQuery {
+    /// The original query vector.
+    #[prost(message, optional, tag = "1")]
+    #[validate(nested)]
+    pub target: ::core::option::Option<Vector>,
+    /// Pairs of results with higher difference in their feedback score.
+    #[prost(message, repeated, tag = "2")]
+    #[validate(nested)]
+    pub feedback_pairs: ::prost::alloc::vec::Vec<FeedbackPair>,
+    /// Formula to use.
+    #[prost(message, optional, tag = "3")]
+    pub formula: ::core::option::Option<FeedbackFormula>,
+}
+#[derive(serde::Serialize)]
+#[derive(validator::Validate)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FeedbackPair {
+    /// A vector with higher feedback score.
+    #[prost(message, optional, tag = "1")]
+    #[validate(nested)]
+    pub positive: ::core::option::Option<Vector>,
+    /// A vector with lower feedback score.
+    #[prost(message, optional, tag = "2")]
+    #[validate(nested)]
+    pub negative: ::core::option::Option<Vector>,
+    /// Difference of feedback scores between these two vectors.
+    #[prost(float, tag = "3")]
+    #[validate(range(min = 0.0))]
+    pub confidence: f32,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FeedbackFormula {
+    #[prost(oneof = "feedback_formula::Variant", tags = "1")]
+    pub variant: ::core::option::Option<feedback_formula::Variant>,
+}
+/// Nested message and enum types in `FeedbackFormula`.
+pub mod feedback_formula {
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Variant {
+        #[prost(message, tag = "1")]
+        Linear(super::LinearFeedbackFormula),
+    }
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LinearFeedbackFormula {
+    #[prost(float, tag = "1")]
+    pub a: f32,
+    #[prost(float, tag = "2")]
+    pub b: f32,
+    #[prost(float, tag = "3")]
+    pub c: f32,
+}
+#[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct QueryEnum {
-    #[prost(oneof = "query_enum::Query", tags = "1, 2, 3, 4, 5")]
+    #[prost(oneof = "query_enum::Query", tags = "1, 2, 3, 4, 5, 6")]
     pub query: ::core::option::Option<query_enum::Query>,
 }
 /// Nested message and enum types in `QueryEnum`.
@@ -10012,6 +10074,9 @@ pub mod query_enum {
         /// Recommend points which have the greatest sum of scores against all vectors. Positive vectors are added, negatives are subtracted.
         #[prost(message, tag = "5")]
         RecommendSumScores(super::RecoQuery),
+        /// Use feedback scoring to guide the search into "better" results
+        #[prost(message, tag = "6")]
+        Feedback(super::FeedbackQuery),
     }
 }
 /// This is only used internally, so it makes more sense to add it here rather than in points.proto
@@ -10140,7 +10205,7 @@ pub mod raw_vector {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RawQuery {
-    #[prost(oneof = "raw_query::Variant", tags = "1, 2, 3, 4, 5")]
+    #[prost(oneof = "raw_query::Variant", tags = "1, 2, 3, 4, 5, 6")]
     pub variant: ::core::option::Option<raw_query::Variant>,
 }
 /// Nested message and enum types in `RawQuery`.
@@ -10181,6 +10246,28 @@ pub mod raw_query {
     }
     #[derive(serde::Serialize)]
     #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Feedback {
+        #[prost(message, optional, tag = "1")]
+        pub target: ::core::option::Option<super::RawVector>,
+        #[prost(message, repeated, tag = "2")]
+        pub feedback_pairs: ::prost::alloc::vec::Vec<RawFeedbackPair>,
+        #[prost(message, optional, tag = "3")]
+        pub formula: ::core::option::Option<super::FeedbackFormula>,
+    }
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct RawFeedbackPair {
+        #[prost(message, optional, tag = "1")]
+        pub positive: ::core::option::Option<super::RawVector>,
+        #[prost(message, optional, tag = "2")]
+        pub negative: ::core::option::Option<super::RawVector>,
+        #[prost(float, tag = "3")]
+        pub confidence: f32,
+    }
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Variant {
         /// ANN
@@ -10198,6 +10285,8 @@ pub mod raw_query {
         /// Recommend points which have the greatest sum of scores against all vectors. Positive vectors are added, negatives are subtracted.
         #[prost(message, tag = "5")]
         RecommendSumScores(Recommend),
+        #[prost(message, tag = "6")]
+        Feedback(Feedback),
     }
 }
 #[derive(serde::Serialize)]

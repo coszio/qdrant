@@ -1,9 +1,13 @@
+use api::grpc::qdrant as grpc;
 use api::rest::SearchRequestInternal;
 use common::types::ScoreType;
 use itertools::Itertools as _;
+use ordered_float::OrderedFloat;
 use segment::data_types::vectors::{NamedQuery, NamedVectorStruct, VectorInternal};
 use segment::types::{Filter, SearchParams, WithPayloadInterface, WithVector};
-use segment::vector_storage::query::{ContextPair, ContextQuery, DiscoveryQuery, RecoQuery};
+use segment::vector_storage::query::{
+    ContextPair, ContextQuery, DiscoveryQuery, FeedbackPair, FeedbackQuery, RecoQuery,
+};
 use sparse::common::sparse_vector::validate_sparse_vector_impl;
 
 use crate::query::query_enum::QueryEnum;
@@ -67,16 +71,16 @@ impl From<SearchRequestInternal> for CoreSearchRequest {
     }
 }
 
-impl TryFrom<api::grpc::qdrant::CoreSearchPoints> for CoreSearchRequest {
+impl TryFrom<grpc::CoreSearchPoints> for CoreSearchRequest {
     type Error = tonic::Status;
 
-    fn try_from(value: api::grpc::qdrant::CoreSearchPoints) -> Result<Self, Self::Error> {
+    fn try_from(value: grpc::CoreSearchPoints) -> Result<Self, Self::Error> {
         let query = value
             .query
             .and_then(|query| query.query)
             .map(|query| {
                 Ok(match query {
-                    api::grpc::qdrant::query_enum::Query::NearestNeighbors(vector) => {
+                    grpc::query_enum::Query::NearestNeighbors(vector) => {
                         let vector_internal = VectorInternal::try_from(vector)?;
                         QueryEnum::Nearest(NamedQuery::from(
                             api::grpc::conversions::into_named_vector_struct(
@@ -85,19 +89,19 @@ impl TryFrom<api::grpc::qdrant::CoreSearchPoints> for CoreSearchRequest {
                             )?,
                         ))
                     }
-                    api::grpc::qdrant::query_enum::Query::RecommendBestScore(query) => {
+                    grpc::query_enum::Query::RecommendBestScore(query) => {
                         QueryEnum::RecommendBestScore(NamedQuery {
                             query: RecoQuery::try_from(query)?,
                             using: value.vector_name,
                         })
                     }
-                    api::grpc::qdrant::query_enum::Query::RecommendSumScores(query) => {
+                    grpc::query_enum::Query::RecommendSumScores(query) => {
                         QueryEnum::RecommendSumScores(NamedQuery {
                             query: RecoQuery::try_from(query)?,
                             using: value.vector_name,
                         })
                     }
-                    api::grpc::qdrant::query_enum::Query::Discover(query) => {
+                    grpc::query_enum::Query::Discover(query) => {
                         let Some(target) = query.target else {
                             return Err(tonic::Status::invalid_argument("Target is not specified"));
                         };
@@ -113,7 +117,7 @@ impl TryFrom<api::grpc::qdrant::CoreSearchPoints> for CoreSearchRequest {
                             using: value.vector_name,
                         })
                     }
-                    api::grpc::qdrant::query_enum::Query::Context(query) => {
+                    grpc::query_enum::Query::Context(query) => {
                         let pairs = query
                             .context
                             .into_iter()
@@ -124,6 +128,39 @@ impl TryFrom<api::grpc::qdrant::CoreSearchPoints> for CoreSearchRequest {
                             query: ContextQuery::new(pairs),
                             using: value.vector_name,
                         })
+                    }
+                    grpc::query_enum::Query::Feedback(grpc::FeedbackQuery {
+                        target,
+                        feedback_pairs,
+                        formula,
+                    }) => {
+                        let target = target
+                            .ok_or_else(|| {
+                                tonic::Status::invalid_argument("Target is not specified")
+                            })?
+                            .try_into()?;
+
+                        let feedback_pairs = feedback_pairs
+                            .into_iter()
+                            .map(try_feedback_pair_from_grpc)
+                            .try_collect()?;
+
+                        let formula = formula.and_then(|f| f.variant).ok_or_else(|| {
+                            tonic::Status::invalid_argument("Formula is not specified")
+                        })?;
+
+                        match formula {
+                            grpc::feedback_formula::Variant::Linear(linear_feedback_formula) => {
+                                QueryEnum::FeedbackLinear(NamedQuery {
+                                    query: FeedbackQuery::new(
+                                        target,
+                                        feedback_pairs,
+                                        linear_feedback_formula.into(),
+                                    ),
+                                    using: value.vector_name,
+                                })
+                            }
+                        }
                     }
                 })
             })
@@ -149,9 +186,9 @@ impl TryFrom<api::grpc::qdrant::CoreSearchPoints> for CoreSearchRequest {
 }
 
 fn try_context_pair_from_grpc(
-    pair: api::grpc::qdrant::ContextPair,
+    pair: grpc::ContextPair,
 ) -> Result<ContextPair<VectorInternal>, tonic::Status> {
-    let api::grpc::qdrant::ContextPair { positive, negative } = pair;
+    let grpc::ContextPair { positive, negative } = pair;
     match (positive, negative) {
         (Some(positive), Some(negative)) => Ok(ContextPair {
             positive: positive.try_into()?,
@@ -163,11 +200,31 @@ fn try_context_pair_from_grpc(
     }
 }
 
-impl TryFrom<api::grpc::qdrant::SearchPoints> for CoreSearchRequest {
+fn try_feedback_pair_from_grpc(
+    pair: grpc::FeedbackPair,
+) -> Result<FeedbackPair<VectorInternal>, tonic::Status> {
+    let grpc::FeedbackPair {
+        positive,
+        negative,
+        confidence,
+    } = pair;
+    match (positive, negative) {
+        (Some(positive), Some(negative)) => Ok(FeedbackPair {
+            positive: positive.try_into()?,
+            negative: negative.try_into()?,
+            confidence: OrderedFloat(confidence),
+        }),
+        _ => Err(tonic::Status::invalid_argument(
+            "All feedback pairs must have both positive and negative parts",
+        )),
+    }
+}
+
+impl TryFrom<grpc::SearchPoints> for CoreSearchRequest {
     type Error = tonic::Status;
 
-    fn try_from(value: api::grpc::qdrant::SearchPoints) -> Result<Self, Self::Error> {
-        let api::grpc::qdrant::SearchPoints {
+    fn try_from(value: grpc::SearchPoints) -> Result<Self, Self::Error> {
+        let grpc::SearchPoints {
             collection_name: _,
             vector,
             filter,
@@ -185,7 +242,7 @@ impl TryFrom<api::grpc::qdrant::SearchPoints> for CoreSearchRequest {
         } = value;
 
         if let Some(sparse_indices) = &sparse_indices {
-            let api::grpc::qdrant::SparseIndices { data } = sparse_indices;
+            let grpc::SparseIndices { data } = sparse_indices;
             validate_sparse_vector_impl(data, &vector).map_err(|e| {
                 tonic::Status::invalid_argument(format!(
                     "Sparse indices does not match sparse vector conditions: {e}"

@@ -331,6 +331,7 @@ impl Validate for super::qdrant::query_enum::Query {
             super::qdrant::query_enum::Query::RecommendSumScores(q) => q.validate(),
             super::qdrant::query_enum::Query::Discover(q) => q.validate(),
             super::qdrant::query_enum::Query::Context(q) => q.validate(),
+            super::qdrant::query_enum::Query::Feedback(q) => q.validate(),
         }
     }
 }

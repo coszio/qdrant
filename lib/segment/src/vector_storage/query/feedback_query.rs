@@ -59,10 +59,10 @@ pub struct FeedbackQuery<T, TFormula> {
     /// The original query vector.
     pub target: T,
 
-    /// Pairs of results with higher difference in their golden score.
+    /// Pairs of results with higher difference in their feedback score.
     pub feedback_pairs: Vec<FeedbackPair<T>>,
 
-    /// Trained coefficients for the formula.
+    /// Formula to use.
     pub formula: TFormula,
 }
 
