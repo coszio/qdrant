@@ -11,7 +11,10 @@ use segment::types::{
     Condition, ExtendedPointId, Filter, HasIdCondition, PointIdType, SearchParams, VectorName,
     VectorNameBuf, WithPayloadInterface, WithVector,
 };
-use segment::vector_storage::query::{ContextPair, ContextQuery, DiscoveryQuery, RecoQuery};
+use segment::vector_storage::query::{
+    ContextPair, ContextQuery, DiscoveryQuery, FeedbackPair, FeedbackQuery, LinearFeedbackFormula,
+    RecoQuery,
+};
 use serde::Serialize;
 use shard::query::query_enum::QueryEnum;
 
@@ -165,6 +168,7 @@ pub enum VectorQuery<T> {
     RecommendSumScores(RecoQuery<T>),
     Discover(DiscoveryQuery<T>),
     Context(ContextQuery<T>),
+    FeedbackLinear(FeedbackQuery<T, LinearFeedbackFormula>),
 }
 
 impl<T> VectorQuery<T> {
@@ -178,6 +182,7 @@ impl<T> VectorQuery<T> {
             | VectorQuery::RecommendSumScores(query) => Box::new(query.flat_iter()),
             VectorQuery::Discover(query) => Box::new(query.flat_iter()),
             VectorQuery::Context(query) => Box::new(query.flat_iter()),
+            VectorQuery::FeedbackLinear(query) => Box::new(query.flat_iter()),
         }
     }
 }
@@ -307,6 +312,40 @@ impl VectorQuery<VectorInputInternal> {
 
                 Ok(VectorQuery::NearestWithMmr(NearestWithMmr { nearest, mmr }))
             }
+            VectorQuery::FeedbackLinear(feedback) => {
+                let target = ids_to_vectors
+                    .resolve_reference(lookup_collection, lookup_vector_name, feedback.target)
+                    .ok_or_else(|| vector_not_found_error(lookup_vector_name))?;
+                let feedback_pairs = feedback
+                    .feedback_pairs
+                    .into_iter()
+                    .map(|pair| {
+                        Ok(FeedbackPair {
+                            positive: ids_to_vectors
+                                .resolve_reference(
+                                    lookup_collection,
+                                    lookup_vector_name,
+                                    pair.positive,
+                                )
+                                .ok_or_else(|| vector_not_found_error(lookup_vector_name))?,
+                            negative: ids_to_vectors
+                                .resolve_reference(
+                                    lookup_collection,
+                                    lookup_vector_name,
+                                    pair.negative,
+                                )
+                                .ok_or_else(|| vector_not_found_error(lookup_vector_name))?,
+                            confidence: pair.confidence,
+                        })
+                    })
+                    .collect::<CollectionResult<_>>()?;
+
+                Ok(VectorQuery::FeedbackLinear(FeedbackQuery {
+                    target,
+                    feedback_pairs,
+                    formula: feedback.formula,
+                }))
+            }
         }
     }
 
@@ -381,6 +420,13 @@ impl VectorQuery<VectorInternal> {
             VectorQuery::NearestWithMmr(NearestWithMmr { nearest, mmr: _ }) => {
                 nearest.preprocess();
             }
+            VectorQuery::FeedbackLinear(feedback) => {
+                feedback.target.preprocess();
+                feedback.feedback_pairs.iter_mut().for_each(|pair| {
+                    pair.positive.preprocess();
+                    pair.negative.preprocess();
+                });
+            }
         }
         self
     }
@@ -433,6 +479,10 @@ impl VectorQuery<VectorInternal> {
                     candidates_limit: candidates_limit.unwrap_or(request_limit),
                 }));
             }
+            VectorQuery::FeedbackLinear(feedback) => QueryEnum::FeedbackLinear(NamedQuery {
+                query: feedback,
+                using: Some(using),
+            }),
         };
 
         Ok(ScoringQuery::Vector(query_enum))
