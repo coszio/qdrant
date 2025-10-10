@@ -792,3 +792,97 @@ mod from_rest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ordered_float::OrderedFloat;
+    use segment::data_types::vectors::VectorInternal;
+    use segment::vector_storage::query::{FeedbackPair, FeedbackQuery, LinearFeedbackFormula};
+
+    #[test]
+    fn test_feedback_linear_flat_iter() {
+        // Create a FeedbackLinear query with test data
+        let feedback_query = FeedbackQuery {
+            target: VectorInternal::Dense(vec![1.0, 2.0, 3.0]),
+            feedback_pairs: vec![
+                FeedbackPair {
+                    positive: VectorInternal::Dense(vec![4.0, 5.0, 6.0]),
+                    negative: VectorInternal::Dense(vec![7.0, 8.0, 9.0]),
+                    confidence: OrderedFloat(0.8),
+                },
+                FeedbackPair {
+                    positive: VectorInternal::Dense(vec![10.0, 11.0, 12.0]),
+                    negative: VectorInternal::Dense(vec![13.0, 14.0, 15.0]),
+                    confidence: OrderedFloat(0.9),
+                },
+            ],
+            formula: LinearFeedbackFormula {
+                a: OrderedFloat(1.0),
+                b: OrderedFloat(1.0),
+                c: OrderedFloat(1.0),
+            },
+        };
+
+        let vector_query = VectorQuery::FeedbackLinear(feedback_query);
+
+        // Test flat_iter returns all vectors (2 pairs * 2 vectors + 1 target = 5 vectors)
+        let vectors: Vec<_> = vector_query.flat_iter().collect();
+        assert_eq!(vectors.len(), 5);
+    }
+
+    #[test]
+    fn test_feedback_linear_preprocess_vectors() {
+        // Create a FeedbackLinear query
+        let feedback_query = FeedbackQuery {
+            target: VectorInternal::Dense(vec![1.0, 2.0, 3.0]),
+            feedback_pairs: vec![FeedbackPair {
+                positive: VectorInternal::Dense(vec![4.0, 5.0, 6.0]),
+                negative: VectorInternal::Dense(vec![7.0, 8.0, 9.0]),
+                confidence: OrderedFloat(0.8),
+            }],
+            formula: LinearFeedbackFormula {
+                a: OrderedFloat(1.0),
+                b: OrderedFloat(1.0),
+                c: OrderedFloat(1.0),
+            },
+        };
+
+        let vector_query = VectorQuery::FeedbackLinear(feedback_query);
+
+        // Test that preprocess_vectors doesn't panic
+        let _processed = vector_query.preprocess_vectors();
+    }
+
+    #[test]
+    fn test_feedback_linear_into_scoring_query() {
+        use segment::data_types::vectors::DEFAULT_VECTOR_NAME;
+
+        // Create a FeedbackLinear query
+        let feedback_query = FeedbackQuery {
+            target: VectorInternal::Dense(vec![1.0, 2.0, 3.0]),
+            feedback_pairs: vec![FeedbackPair {
+                positive: VectorInternal::Dense(vec![4.0, 5.0, 6.0]),
+                negative: VectorInternal::Dense(vec![7.0, 8.0, 9.0]),
+                confidence: OrderedFloat(0.8),
+            }],
+            formula: LinearFeedbackFormula {
+                a: OrderedFloat(1.0),
+                b: OrderedFloat(1.0),
+                c: OrderedFloat(1.0),
+            },
+        };
+
+        let vector_query = VectorQuery::FeedbackLinear(feedback_query);
+
+        // Test conversion to scoring query
+        let result = vector_query.into_scoring_query(DEFAULT_VECTOR_NAME.to_string(), 10);
+        assert!(result.is_ok());
+
+        if let Ok(ScoringQuery::Vector(QueryEnum::FeedbackLinear(_))) = result {
+            // Success - the variant is correctly converted
+        } else {
+            panic!("Expected ScoringQuery::Vector(QueryEnum::FeedbackLinear)");
+        }
+    }
+}
