@@ -214,31 +214,26 @@ pub fn init(
             .add_service(reflection_service)
             .add_service(
                 QdrantServer::new(qdrant_service)
-                    .send_compressed(CompressionEncoding::Gzip)
                     .accept_compressed(CompressionEncoding::Gzip)
                     .max_decoding_message_size(usize::MAX),
             )
             .add_service(
                 CollectionsServer::new(collections_service)
-                    .send_compressed(CompressionEncoding::Gzip)
                     .accept_compressed(CompressionEncoding::Gzip)
                     .max_decoding_message_size(usize::MAX),
             )
             .add_service(
                 PointsServer::new(points_service)
-                    .send_compressed(CompressionEncoding::Gzip)
                     .accept_compressed(CompressionEncoding::Gzip)
                     .max_decoding_message_size(usize::MAX),
             )
             .add_service(
                 SnapshotsServer::new(snapshot_service)
-                    .send_compressed(CompressionEncoding::Gzip)
                     .accept_compressed(CompressionEncoding::Gzip)
                     .max_decoding_message_size(usize::MAX),
             )
             .add_service(
                 HealthServer::new(health_service)
-                    .send_compressed(CompressionEncoding::Gzip)
                     .accept_compressed(CompressionEncoding::Gzip)
                     .max_decoding_message_size(usize::MAX),
             )
@@ -316,37 +311,31 @@ pub fn init_internal(
                 .layer(middleware_layer)
                 .add_service(
                     QdrantServer::new(qdrant_service)
-                        .send_compressed(CompressionEncoding::Gzip)
                         .accept_compressed(CompressionEncoding::Gzip)
                         .max_decoding_message_size(usize::MAX),
                 )
                 .add_service(
                     QdrantInternalServer::new(qdrant_internal_service)
-                        .send_compressed(CompressionEncoding::Gzip)
                         .accept_compressed(CompressionEncoding::Gzip)
                         .max_decoding_message_size(usize::MAX),
                 )
                 .add_service(
                     CollectionsInternalServer::new(collections_internal_service)
-                        .send_compressed(CompressionEncoding::Gzip)
                         .accept_compressed(CompressionEncoding::Gzip)
                         .max_decoding_message_size(usize::MAX),
                 )
                 .add_service(
                     PointsInternalServer::new(points_internal_service)
-                        .send_compressed(CompressionEncoding::Gzip)
                         .accept_compressed(CompressionEncoding::Gzip)
                         .max_decoding_message_size(usize::MAX),
                 )
                 .add_service(
                     ShardSnapshotsServer::new(shard_snapshots_service)
-                        .send_compressed(CompressionEncoding::Gzip)
                         .accept_compressed(CompressionEncoding::Gzip)
                         .max_decoding_message_size(usize::MAX),
                 )
                 .add_service(
                     RaftServer::new(raft_service)
-                        .send_compressed(CompressionEncoding::Gzip)
                         .accept_compressed(CompressionEncoding::Gzip)
                         .max_decoding_message_size(usize::MAX),
                 )
