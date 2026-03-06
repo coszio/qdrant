@@ -98,16 +98,17 @@ impl<S: UniversalRead<u64>> BitSliceStorage<S> {
         Ok(Some(bit != 0))
     }
 
-    /// Read a range of bits, returning them as a [`BitVec`].
+    /// Validate a bit range and return the corresponding element range.
     ///
-    /// Translates the bit range to element-aligned reads so that only the
-    /// minimal number of `u64` elements is fetched from the backend.
-    pub fn read_bit_range(&self, bit_start: u64, bit_count: u64) -> Result<BitVec<u64, Lsb0>> {
-        if bit_count == 0 {
-            return Ok(BitVec::new());
-        }
-
-        let bit_end = bit_start + bit_count;
+    /// Returns `(element_start, element_count, offset_in_first_element)`.
+    fn validate_bit_range(&self, bit_start: u64, bit_count: u64) -> Result<(u64, u64, usize)> {
+        let bit_end = bit_start.checked_add(bit_count).ok_or_else(|| {
+            UniversalIoError::OutOfBounds {
+                start: bit_start,
+                end: u64::MAX,
+                data_length: self.bit_len() as usize,
+            }
+        })?;
         let total_bits = self.bit_len();
 
         if bit_end > total_bits {
@@ -121,6 +122,22 @@ impl<S: UniversalRead<u64>> BitSliceStorage<S> {
         let element_start = bit_start / BITS_PER_ELEMENT;
         let element_end = bit_end.div_ceil(BITS_PER_ELEMENT);
         let element_count = element_end - element_start;
+        let offset_in_first = (bit_start % BITS_PER_ELEMENT) as usize;
+
+        Ok((element_start, element_count, offset_in_first))
+    }
+
+    /// Read a range of bits, returning them as a [`BitVec`].
+    ///
+    /// Translates the bit range to element-aligned reads so that only the
+    /// minimal number of `u64` elements is fetched from the backend.
+    pub fn read_bit_range(&self, bit_start: u64, bit_count: u64) -> Result<BitVec<u64, Lsb0>> {
+        if bit_count == 0 {
+            return Ok(BitVec::new());
+        }
+
+        let (element_start, element_count, offset_in_first) =
+            self.validate_bit_range(bit_start, bit_count)?;
 
         let elements = self.storage.read::<false>(ElementsRange {
             start: element_start,
@@ -128,10 +145,9 @@ impl<S: UniversalRead<u64>> BitSliceStorage<S> {
         })?;
 
         let all_bits = BitSlice::<u64, Lsb0>::from_slice(&elements);
-        let offset_within_first = (bit_start % BITS_PER_ELEMENT) as usize;
-        let end_within = offset_within_first + bit_count as usize;
+        let end_within = offset_in_first + bit_count as usize;
 
-        let sub = &all_bits[offset_within_first..end_within];
+        let sub = &all_bits[offset_in_first..end_within];
         Ok(sub.to_bitvec())
     }
 
@@ -198,33 +214,6 @@ impl<S: UniversalWrite<u64>> BitSliceStorage<S> {
     /// This is the equivalent of [`BitSlice::replace`] for universal IO.
     pub fn replace_bit(&mut self, bit_index: u64, value: bool) -> Result<bool> {
         self.modify_bit(bit_index, value)
-    }
-
-    /// Validate a bit range and return the corresponding element range.
-    ///
-    /// Returns `(element_start, element_count, offset_in_first_element)`.
-    fn validate_bit_range(
-        &self,
-        bit_start: u64,
-        bit_count: u64,
-    ) -> Result<(u64, u64, usize)> {
-        let bit_end = bit_start + bit_count;
-        let total_bits = self.bit_len();
-
-        if bit_end > total_bits {
-            return Err(UniversalIoError::OutOfBounds {
-                start: bit_start,
-                end: bit_end,
-                data_length: total_bits as usize,
-            });
-        }
-
-        let element_start = bit_start / BITS_PER_ELEMENT;
-        let element_end = bit_end.div_ceil(BITS_PER_ELEMENT);
-        let element_count = element_end - element_start;
-        let offset_in_first = (bit_start % BITS_PER_ELEMENT) as usize;
-
-        Ok((element_start, element_count, offset_in_first))
     }
 
     /// Write a range of bits from a [`BitSlice`] into the storage.
@@ -307,9 +296,11 @@ impl<S: UniversalWrite<u64>> BitSliceStorage<S> {
 
         for (element_index, bit_updates) in by_element {
             if element_index >= self.element_len {
+                // Report the first offending bit index for a useful error message
+                let first_bit = element_index * BITS_PER_ELEMENT + bit_updates[0].0;
                 return Err(UniversalIoError::OutOfBounds {
-                    start: element_index * BITS_PER_ELEMENT,
-                    end: (element_index + 1) * BITS_PER_ELEMENT,
+                    start: first_bit,
+                    end: first_bit + 1,
                     data_length: self.bit_len() as usize,
                 });
             }
@@ -319,16 +310,19 @@ impl<S: UniversalWrite<u64>> BitSliceStorage<S> {
                 length: 1,
             })?;
 
-            let mut element = elements[0];
+            let old_element = elements[0];
+            let mut new_element = old_element;
             for (bit_within_element, value) in bit_updates {
                 if value {
-                    element |= 1u64 << bit_within_element;
+                    new_element |= 1u64 << bit_within_element;
                 } else {
-                    element &= !(1u64 << bit_within_element);
+                    new_element &= !(1u64 << bit_within_element);
                 }
             }
 
-            self.storage.write(element_index, &[element])?;
+            if old_element != new_element {
+                self.storage.write(element_index, &[new_element])?;
+            }
         }
 
         Ok(())
