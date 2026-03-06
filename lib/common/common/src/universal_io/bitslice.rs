@@ -127,13 +127,20 @@ impl<S: UniversalRead<u64>> BitSliceStorage<S> {
         Ok((element_start, element_count, offset_in_first))
     }
 
-    /// Read a range of bits, returning them as a [`BitVec`].
+    /// Read a range of bits, returning them as a [`Cow`] bitslice.
+    ///
+    /// Returns `Cow::Borrowed` when the backend supports zero-copy reads
+    /// (e.g., mmap), otherwise returns `Cow::Owned`.
     ///
     /// Translates the bit range to element-aligned reads so that only the
     /// minimal number of `u64` elements is fetched from the backend.
-    pub fn read_bit_range(&self, bit_start: u64, bit_count: u64) -> Result<BitVec<u64, Lsb0>> {
+    pub fn read_bit_range(
+        &self,
+        bit_start: u64,
+        bit_count: u64,
+    ) -> Result<Cow<'_, BitSlice<u64, Lsb0>>> {
         if bit_count == 0 {
-            return Ok(BitVec::new());
+            return Ok(Cow::Owned(BitVec::new()));
         }
 
         let (element_start, element_count, offset_in_first) =
@@ -144,11 +151,18 @@ impl<S: UniversalRead<u64>> BitSliceStorage<S> {
             length: element_count,
         })?;
 
-        let all_bits = BitSlice::<u64, Lsb0>::from_slice(&elements);
         let end_within = offset_in_first + bit_count as usize;
 
-        let sub = &all_bits[offset_in_first..end_within];
-        Ok(sub.to_bitvec())
+        match elements {
+            Cow::Borrowed(slice) => {
+                let all_bits = BitSlice::<u64, Lsb0>::from_slice(slice);
+                Ok(Cow::Borrowed(&all_bits[offset_in_first..end_within]))
+            }
+            Cow::Owned(vec) => {
+                let all_bits = BitSlice::<u64, Lsb0>::from_slice(&vec);
+                Ok(Cow::Owned(all_bits[offset_in_first..end_within].to_bitvec()))
+            }
+        }
     }
 
     /// Populate the underlying storage's RAM cache.
@@ -632,5 +646,19 @@ mod tests {
         assert_eq!(bs.len(), storage.bit_len() as usize);
         // With mmap backend, read_all returns Cow::Borrowed (zero-copy)
         assert!(matches!(bs, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_read_bit_range_zero_copy() {
+        let data = [0xAB, 0xCD, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let f = create_temp_file(&data);
+
+        let storage: MmapBitSliceStorage =
+            BitSliceStorage::open(f.path(), OpenOptions::default()).unwrap();
+
+        // With mmap backend, read_bit_range returns Cow::Borrowed (zero-copy)
+        let bits = storage.read_bit_range(0, 16).unwrap();
+        assert!(matches!(bits, Cow::Borrowed(_)));
+        assert_eq!(bits.len(), 16);
     }
 }
