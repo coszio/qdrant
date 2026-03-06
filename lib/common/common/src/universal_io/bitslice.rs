@@ -6,18 +6,23 @@
 //! operations at the bit level.
 
 use std::borrow::Cow;
+use std::mem::size_of;
 use std::path::Path;
 
 use bitvec::order::Lsb0;
 use bitvec::slice::BitSlice;
 use bitvec::vec::BitVec;
 
+use crate::mmap::create_and_ensure_length;
 use crate::universal_io::{
     ElementsRange, Flusher, OpenOptions, Result, UniversalIoError, UniversalRead, UniversalWrite,
 };
 
 /// Number of bits per `u64` element.
 const BITS_PER_ELEMENT: u64 = u64::BITS as u64;
+
+/// Convenience alias for a bitslice backed by a memory-mapped file.
+pub type MmapBitSliceStorage = BitSliceStorage<crate::universal_io::mmap::MmapUniversal<u64>>;
 
 /// A storage-agnostic bitslice that supports both reading and writing bits.
 ///
@@ -52,6 +57,19 @@ impl<S: UniversalRead<u64>> BitSliceStorage<S> {
         })
     }
 
+    /// Create a new bitslice storage file with the given number of bits, all
+    /// initialized to `false`.
+    ///
+    /// Creates the file at `path`, sizes it to hold at least `num_bits` bits
+    /// (u64-aligned), and opens it.
+    pub fn create(path: impl AsRef<Path>, num_bits: usize, options: OpenOptions) -> Result<Self> {
+        let byte_len = num_bits
+            .div_ceil(u8::BITS as usize)
+            .next_multiple_of(size_of::<u64>());
+        create_and_ensure_length(path.as_ref(), byte_len)?;
+        Self::open(path, options)
+    }
+
     /// Total number of bits available.
     pub fn bit_len(&self) -> u64 {
         self.element_len * BITS_PER_ELEMENT
@@ -72,6 +90,11 @@ impl<S: UniversalRead<u64>> BitSliceStorage<S> {
             Cow::Borrowed(slice) => Ok(Cow::Borrowed(BitSlice::from_slice(slice))),
             Cow::Owned(vec) => Ok(Cow::Owned(BitVec::from_vec(vec))),
         }
+    }
+
+    /// Count the number of set bits in the entire storage.
+    pub fn count_ones(&self) -> Result<usize> {
+        Ok(self.read_all()?.count_ones())
     }
 
     /// Get a single bit at the given bit index.

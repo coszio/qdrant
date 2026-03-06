@@ -9,8 +9,7 @@ use common::ext::BitSliceExt as _;
 use common::mmap::{AdviceSetting, MmapSlice, create_and_ensure_length, open_write_mmap};
 use common::types::PointOffsetType;
 use common::universal_io::OpenOptions;
-use common::universal_io::bitslice::BitSliceStorage;
-use common::universal_io::mmap::MmapUniversal;
+use common::universal_io::bitslice::MmapBitSliceStorage;
 use fs_err::File;
 use uuid::Uuid;
 
@@ -247,17 +246,14 @@ impl ImmutableIdTracker {
     }
 
     pub fn open(segment_path: &Path) -> OperationResult<Self> {
-        let deleted_storage = BitSliceStorage::<MmapUniversal<u64>>::open(
+        let deleted_storage = MmapBitSliceStorage::open(
             &Self::deleted_file_path(segment_path),
             OpenOptions {
                 populate: Some(true),
                 ..OpenOptions::default()
             },
         )?;
-        let deleted_bitvec: BitVec = {
-            let bits = deleted_storage.read_all()?;
-            bits.iter().by_vals().collect()
-        };
+        let deleted_bitvec: BitVec = deleted_storage.read_all()?.iter().by_vals().collect();
         let deleted_wrapper = MmapBitSliceBufferedUpdateWrapper::new(deleted_storage);
 
         let internal_to_version_map = open_write_mmap(
@@ -290,25 +286,29 @@ impl ImmutableIdTracker {
     ) -> OperationResult<Self> {
         // Create mmap file for deleted bitvec
         let deleted_filepath = Self::deleted_file_path(path);
-        {
-            let deleted_size = bitmap_mmap_size(mappings.total_point_count());
-            create_and_ensure_length(&deleted_filepath, deleted_size)?;
-        }
 
         debug_assert!(mappings.deleted().len() <= mappings.total_point_count());
 
-        let mut deleted_storage = BitSliceStorage::<MmapUniversal<u64>>::open(
+        let mut deleted_storage = MmapBitSliceStorage::create(
             &deleted_filepath,
+            mappings.total_point_count(),
             OpenOptions::default(),
         )?;
-        for (i, bit) in mappings.deleted().iter().by_vals().enumerate() {
-            if bit {
-                deleted_storage.set_bit(i as u64, true)?;
-            }
-        }
-        for i in mappings.deleted().len()..mappings.total_point_count() {
-            deleted_storage.set_bit(i as u64, true)?;
-        }
+        // Set bits for deleted points from the mappings, plus any trailing points
+        // beyond mappings.deleted().len() are also marked deleted.
+        deleted_storage.set_bits_batch(
+            mappings
+                .deleted()
+                .iter()
+                .by_vals()
+                .enumerate()
+                .filter(|(_, bit)| *bit)
+                .map(|(idx, _)| (idx as u64, true))
+                .chain(
+                    (mappings.deleted().len()..mappings.total_point_count())
+                        .map(|i| (i as u64, true)),
+                ),
+        )?;
         deleted_storage.flusher()()?;
         let deleted_wrapper = MmapBitSliceBufferedUpdateWrapper::new(deleted_storage);
 
@@ -383,11 +383,6 @@ impl ImmutableIdTracker {
 fn mmap_size<T>(len: usize) -> usize {
     let item_width = size_of::<T>();
     len.div_ceil(item_width) * item_width // Make it a multiple of usize-width.
-}
-
-/// Returns the required mmap filesize for a `BitSlice`.
-fn bitmap_mmap_size(number_of_elements: usize) -> usize {
-    mmap_size::<usize>(number_of_elements.div_ceil(u8::BITS as usize))
 }
 
 impl IdTracker for ImmutableIdTracker {

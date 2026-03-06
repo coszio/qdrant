@@ -8,12 +8,12 @@ use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
 use common::fs::{atomic_save_json, clear_disk_cache, read_json};
 use common::mmap;
 use common::mmap::{AdviceSetting, MmapSlice, create_and_ensure_length};
-use memmap2::MmapMut;
 use common::types::PointOffsetType;
 use common::universal_io::OpenOptions;
 use common::universal_io::UniversalRead;
-use common::universal_io::bitslice::BitSliceStorage;
+use common::universal_io::bitslice::MmapBitSliceStorage;
 use common::universal_io::mmap::MmapUniversal;
+use memmap2::MmapMut;
 use fs_err as fs;
 use serde::{Deserialize, Serialize};
 
@@ -135,23 +135,19 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
         }
 
         {
-            const BITS_IN_BYTE: usize = 8;
-            let deleted_flags_count = in_memory_index.point_to_values.len();
-            create_and_ensure_length(
+            let mut deleted = MmapBitSliceStorage::create(
                 &deleted_path,
-                BITS_IN_BYTE
-                    * BITS_IN_BYTE
-                    * deleted_flags_count.div_ceil(BITS_IN_BYTE * BITS_IN_BYTE),
-            )?;
-            let mut deleted = BitSliceStorage::<MmapUniversal<u64>>::open(
-                &deleted_path,
+                in_memory_index.point_to_values.len(),
                 OpenOptions::default(),
             )?;
-            for (idx, values) in in_memory_index.point_to_values.iter().enumerate() {
-                if values.is_empty() {
-                    deleted.set_bit(idx as u64, true)?;
-                }
-            }
+            deleted.set_bits_batch(
+                in_memory_index
+                    .point_to_values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, values)| values.is_empty())
+                    .map(|(idx, _)| (idx as u64, true)),
+            )?;
             deleted.flusher()()?;
         }
 
@@ -173,11 +169,8 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
 
         let histogram = Histogram::<T>::load(path)?;
         let config: MmapNumericIndexConfig = read_json(&config_path)?;
-        let deleted = BitSliceStorage::<MmapUniversal<u64>>::open(
-            &deleted_path,
-            OpenOptions::default(),
-        )?;
-        let deleted_count = deleted.read_all()?.count_ones();
+        let deleted = MmapBitSliceStorage::open(&deleted_path, OpenOptions::default())?;
+        let deleted_count = deleted.count_ones()?;
         let do_populate = !is_on_disk;
         let map = unsafe {
             MmapSlice::try_from(mmap::open_write_mmap(

@@ -1,21 +1,18 @@
 use std::sync::Arc;
 
 use ahash::AHashMap;
-use common::universal_io::bitslice::BitSliceStorage;
-use common::universal_io::mmap::MmapUniversal;
+use common::universal_io::bitslice::MmapBitSliceStorage;
 use parking_lot::RwLock;
 
 use crate::common::Flusher;
 use crate::common::operation_error::OperationError;
 
-type MmapBitSlice = BitSliceStorage<MmapUniversal<u64>>;
-
-/// A wrapper around [`BitSliceStorage`] that delays writing changes to the underlying file until
-/// they get flushed manually.
+/// A wrapper around [`MmapBitSliceStorage`] that delays writing changes to the underlying file
+/// until they get flushed manually.
 /// This expects the underlying storage not to grow in size.
 #[derive(Debug)]
 pub struct MmapBitSliceBufferedUpdateWrapper {
-    bitslice: Arc<RwLock<MmapBitSlice>>,
+    bitslice: Arc<RwLock<MmapBitSliceStorage>>,
     len: usize,
     pending_updates: Arc<RwLock<AHashMap<usize, bool>>>,
     /// Lock to prevent concurrent flush and drop
@@ -23,7 +20,7 @@ pub struct MmapBitSliceBufferedUpdateWrapper {
 }
 
 impl MmapBitSliceBufferedUpdateWrapper {
-    pub fn new(bitslice: MmapBitSlice) -> Self {
+    pub fn new(bitslice: MmapBitSliceStorage) -> Self {
         let len = bitslice.bit_len() as usize;
         Self {
             bitslice: Arc::new(RwLock::new(bitslice)),
@@ -49,11 +46,14 @@ impl MmapBitSliceBufferedUpdateWrapper {
         if let Some(value) = self.pending_updates.read().get(&index) {
             Some(*value)
         } else {
-            self.bitslice
-                .read()
-                .get_bit(index as u64)
-                .ok()
-                .flatten()
+            match self.bitslice.read().get_bit(index as u64) {
+                Ok(value) => value,
+                Err(err) => {
+                    log::error!("Error reading bit at index {index}: {err}");
+                    debug_assert!(false, "Error reading bit at index {index}: {err}");
+                    None
+                }
+            }
         }
     }
 
@@ -103,9 +103,9 @@ impl MmapBitSliceBufferedUpdateWrapper {
             };
 
             let mut storage_write = bitslice.write();
-            for (index, value) in updates.iter() {
-                storage_write.set_bit(*index as u64, *value)?;
-            }
+            storage_write.set_bits_batch(
+                updates.iter().map(|(idx, val)| (*idx as u64, *val)),
+            )?;
             storage_write.flusher()()?;
 
             // Keep the guard till here to prevent concurrent drop/flushes
