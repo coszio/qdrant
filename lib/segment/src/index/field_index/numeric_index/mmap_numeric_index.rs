@@ -7,12 +7,14 @@ use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::iterator_hw_measurement::HwMeasurementIteratorExt;
 use common::fs::{atomic_save_json, clear_disk_cache, read_json};
 use common::mmap;
-use common::mmap::{AdviceSetting, MmapBitSlice, MmapSlice, create_and_ensure_length};
+use common::mmap::{AdviceSetting, MmapSlice, create_and_ensure_length};
+use memmap2::MmapMut;
 use common::types::PointOffsetType;
+use common::universal_io::OpenOptions;
 use common::universal_io::UniversalRead;
+use common::universal_io::bitslice::BitSliceStorage;
 use common::universal_io::mmap::MmapUniversal;
 use fs_err as fs;
-use memmap2::MmapMut;
 use serde::{Deserialize, Serialize};
 
 use super::Encodable;
@@ -135,20 +137,22 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
         {
             const BITS_IN_BYTE: usize = 8;
             let deleted_flags_count = in_memory_index.point_to_values.len();
-            let deleted_file = create_and_ensure_length(
+            create_and_ensure_length(
                 &deleted_path,
                 BITS_IN_BYTE
                     * BITS_IN_BYTE
                     * deleted_flags_count.div_ceil(BITS_IN_BYTE * BITS_IN_BYTE),
             )?;
-            let mut deleted_mmap = unsafe { MmapMut::map_mut(&deleted_file)? };
-            deleted_mmap.fill(0);
-            let mut deleted_bitflags = MmapBitSlice::from(deleted_mmap, 0);
+            let mut deleted = BitSliceStorage::<MmapUniversal<u64>>::open(
+                &deleted_path,
+                OpenOptions::default(),
+            )?;
             for (idx, values) in in_memory_index.point_to_values.iter().enumerate() {
                 if values.is_empty() {
-                    deleted_bitflags.set(idx, true);
+                    deleted.set_bit(idx as u64, true)?;
                 }
             }
+            deleted.flusher()()?;
         }
 
         Self::open(path, is_on_disk)?.ok_or_else(|| {
@@ -169,9 +173,11 @@ impl<T: Encodable + Numericable + Default + MmapValue> MmapNumericIndex<T> {
 
         let histogram = Histogram::<T>::load(path)?;
         let config: MmapNumericIndexConfig = read_json(&config_path)?;
-        let deleted = mmap::open_write_mmap(&deleted_path, AdviceSetting::Global, false)?;
-        let deleted = MmapBitSlice::from(deleted, 0);
-        let deleted_count = deleted.count_ones();
+        let deleted = BitSliceStorage::<MmapUniversal<u64>>::open(
+            &deleted_path,
+            OpenOptions::default(),
+        )?;
+        let deleted_count = deleted.read_all()?.count_ones();
         let do_populate = !is_on_disk;
         let map = unsafe {
             MmapSlice::try_from(mmap::open_write_mmap(

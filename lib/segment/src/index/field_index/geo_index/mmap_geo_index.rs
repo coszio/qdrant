@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use common::counter::conditioned_counter::ConditionedCounter;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::fs::{atomic_save_json, clear_disk_cache, read_json};
-use common::mmap::{
-    AdviceSetting, MmapBitSlice, MmapSlice, create_and_ensure_length, open_write_mmap,
-};
+use common::mmap::{AdviceSetting, MmapSlice, create_and_ensure_length, open_write_mmap};
+use memmap2::MmapMut;
 use common::types::PointOffsetType;
+use common::universal_io::OpenOptions;
+use common::universal_io::bitslice::BitSliceStorage;
 use common::universal_io::mmap::MmapUniversal;
 use fs_err as fs;
-use memmap2::MmapMut;
 use serde::{Deserialize, Serialize};
 
 use super::mutable_geo_index::InMemoryGeoMapIndex;
@@ -172,20 +172,22 @@ impl MmapGeoMapIndex {
 
         {
             let deleted_flags_count = dynamic_index.point_to_values.len();
-            let deleted_file = create_and_ensure_length(
+            create_and_ensure_length(
                 &deleted_path,
                 deleted_flags_count
                     .div_ceil(u8::BITS as usize)
-                    .next_multiple_of(std::mem::size_of::<usize>()),
+                    .next_multiple_of(std::mem::size_of::<u64>()),
             )?;
-            let mut deleted_mmap = unsafe { MmapMut::map_mut(&deleted_file)? };
-            deleted_mmap.fill(0);
-            let mut deleted_bitflags = MmapBitSlice::from(deleted_mmap, 0);
+            let mut deleted = BitSliceStorage::<MmapUniversal<u64>>::open(
+                &deleted_path,
+                OpenOptions::default(),
+            )?;
             for (idx, values) in dynamic_index.point_to_values.iter().enumerate() {
                 if values.is_empty() {
-                    deleted_bitflags.set(idx, true);
+                    deleted.set_bit(idx as u64, true)?;
                 }
             }
+            deleted.flusher()()?;
         }
 
         atomic_save_json(
@@ -238,9 +240,14 @@ impl MmapGeoMapIndex {
         };
         let point_to_values = MmapPointToValues::open(path, true)?;
 
-        let deleted = open_write_mmap(&deleted_path, AdviceSetting::Global, populate)?;
-        let deleted = MmapBitSlice::from(deleted, 0);
-        let deleted_count = deleted.count_ones();
+        let deleted = BitSliceStorage::<MmapUniversal<u64>>::open(
+            &deleted_path,
+            OpenOptions {
+                populate: Some(populate),
+                ..OpenOptions::default()
+            },
+        )?;
+        let deleted_count = deleted.read_all()?.count_ones();
 
         Ok(Some(Self {
             path: path.to_owned(),

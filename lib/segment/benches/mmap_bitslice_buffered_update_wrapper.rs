@@ -1,10 +1,12 @@
 use std::hint::black_box;
 use std::iter;
+use std::mem::size_of;
 
-use common::mmap::MmapBitSlice;
+use common::mmap::create_and_ensure_length;
+use common::universal_io::OpenOptions;
+use common::universal_io::bitslice::BitSliceStorage;
+use common::universal_io::mmap::MmapUniversal;
 use criterion::{Criterion, criterion_group, criterion_main};
-use fs_err::File;
-use memmap2::MmapMut;
 use rand::prelude::*;
 use rand::rngs::StdRng;
 use segment::common::mmap_bitslice_buffered_update_wrapper::MmapBitSliceBufferedUpdateWrapper;
@@ -19,14 +21,13 @@ fn mmap_bitslice_buffered_update_wrapper(c: &mut Criterion) {
     let dir = tempdir().unwrap();
     let path = dir.path().join("bitslice.mmap");
 
-    let file = File::create_new(path).unwrap();
-    file.set_len(SIZE as u64).unwrap();
-    file.sync_all().unwrap();
+    let file_size = SIZE.div_ceil(u8::BITS as usize).next_multiple_of(size_of::<u64>());
+    create_and_ensure_length(&path, file_size).unwrap();
 
-    let mmap_mut = unsafe { MmapMut::map_mut(&file).unwrap() };
-    let mmap_bitslice = MmapBitSlice::from(mmap_mut, 0);
+    let bitslice_storage =
+        BitSliceStorage::<MmapUniversal<u64>>::open(&path, OpenOptions::default()).unwrap();
     let mmap_bitslice_buffered_update_wrapper =
-        MmapBitSliceBufferedUpdateWrapper::new(mmap_bitslice);
+        MmapBitSliceBufferedUpdateWrapper::new(bitslice_storage);
 
     // Set random flags and persist
     for _ in 0..FLAG_COUNT {

@@ -5,9 +5,12 @@ use bitvec::vec::BitVec;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::fs::clear_disk_cache;
 use common::mmap;
-use common::mmap::{AdviceSetting, MmapBitSlice, MmapSlice};
+use common::mmap::{AdviceSetting, MmapSlice, create_and_ensure_length};
 use common::mmap_hashmap::{MmapHashMap, READ_ENTRY_OVERHEAD};
 use common::types::PointOffsetType;
+use common::universal_io::OpenOptions;
+use common::universal_io::bitslice::BitSliceStorage;
+use common::universal_io::mmap::MmapUniversal;
 use itertools::Either;
 use mmap_postings::{MmapPostingValue, MmapPostings};
 
@@ -88,7 +91,23 @@ impl MmapInvertedIndex {
             .iter()
             .map(|count| *count == 0)
             .collect();
-        MmapBitSlice::create(&deleted_points_path, &deleted_bitslice)?;
+        {
+            let bits_count = deleted_bitslice.len();
+            let bytes_count = bits_count
+                .div_ceil(u8::BITS as usize)
+                .next_multiple_of(std::mem::size_of::<u64>());
+            create_and_ensure_length(&deleted_points_path, bytes_count)?;
+            let mut deleted_storage = BitSliceStorage::<MmapUniversal<u64>>::open(
+                &deleted_points_path,
+                OpenOptions::default(),
+            )?;
+            for (i, bit) in deleted_bitslice.iter().by_vals().enumerate() {
+                if bit {
+                    deleted_storage.set_bit(i as u64, true)?;
+                }
+            }
+            deleted_storage.flusher()()?;
+        }
 
         // The actual values go in the slice
         let point_to_tokens_count_iter = point_to_tokens_count.iter().copied();
@@ -130,10 +149,14 @@ impl MmapInvertedIndex {
             )?)?
         };
 
-        let deleted = mmap::open_write_mmap(&deleted_points_path, AdviceSetting::Global, populate)?;
-        let deleted = MmapBitSlice::from(deleted, 0);
-
-        let num_deleted_points = deleted.count_ones();
+        let deleted = BitSliceStorage::<MmapUniversal<u64>>::open(
+            &deleted_points_path,
+            OpenOptions {
+                populate: Some(populate),
+                ..OpenOptions::default()
+            },
+        )?;
+        let num_deleted_points = deleted.read_all()?.count_ones();
         let deleted_points = MmapBitSliceBufferedUpdateWrapper::new(deleted);
         let points_count = point_to_tokens_count.len() - num_deleted_points;
 

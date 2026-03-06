@@ -25,6 +25,7 @@ const BITS_PER_ELEMENT: u64 = u64::BITS as u64;
 /// interprets the underlying `u64` elements as a sequence of bits.
 /// Bit-level operations are translated to element-level reads and writes
 /// on the backend.
+#[derive(Debug)]
 pub struct BitSliceStorage<S> {
     storage: S,
     /// Total number of `u64` elements in the underlying storage.

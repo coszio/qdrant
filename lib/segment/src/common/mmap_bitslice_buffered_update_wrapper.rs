@@ -1,34 +1,35 @@
 use std::sync::Arc;
 
 use ahash::AHashMap;
-use common::ext::BitSliceExt as _;
-use common::is_alive_lock::IsAliveLock;
-use common::mmap::MmapBitSlice;
+use common::universal_io::bitslice::BitSliceStorage;
+use common::universal_io::mmap::MmapUniversal;
 use parking_lot::RwLock;
 
 use crate::common::Flusher;
 use crate::common::operation_error::OperationError;
 
-/// A wrapper around `MmapBitSlice` that delays writing changes to the underlying file until they get
-/// flushed manually.
-/// This expects the underlying MmapBitSlice not to grow in size.
+type MmapBitSlice = BitSliceStorage<MmapUniversal<u64>>;
+
+/// A wrapper around [`BitSliceStorage`] that delays writing changes to the underlying file until
+/// they get flushed manually.
+/// This expects the underlying storage not to grow in size.
 #[derive(Debug)]
 pub struct MmapBitSliceBufferedUpdateWrapper {
     bitslice: Arc<RwLock<MmapBitSlice>>,
     len: usize,
     pending_updates: Arc<RwLock<AHashMap<usize, bool>>>,
     /// Lock to prevent concurrent flush and drop
-    is_alive_flush_lock: IsAliveLock,
+    is_alive_flush_lock: common::is_alive_lock::IsAliveLock,
 }
 
 impl MmapBitSliceBufferedUpdateWrapper {
     pub fn new(bitslice: MmapBitSlice) -> Self {
-        let len = bitslice.len();
+        let len = bitslice.bit_len() as usize;
         Self {
             bitslice: Arc::new(RwLock::new(bitslice)),
             len,
             pending_updates: Arc::new(RwLock::new(AHashMap::new())),
-            is_alive_flush_lock: IsAliveLock::new(),
+            is_alive_flush_lock: common::is_alive_lock::IsAliveLock::new(),
         }
     }
 
@@ -48,7 +49,11 @@ impl MmapBitSliceBufferedUpdateWrapper {
         if let Some(value) = self.pending_updates.read().get(&index) {
             Some(*value)
         } else {
-            self.bitslice.read().get_bit(index)
+            self.bitslice
+                .read()
+                .get_bit(index as u64)
+                .ok()
+                .flatten()
         }
     }
 
@@ -97,11 +102,11 @@ impl MmapBitSliceBufferedUpdateWrapper {
                 ));
             };
 
-            let mut mmap_slice_write = bitslice.write();
+            let mut storage_write = bitslice.write();
             for (index, value) in updates.iter() {
-                mmap_slice_write.set(*index, *value);
+                storage_write.set_bit(*index as u64, *value)?;
             }
-            mmap_slice_write.flusher()()?;
+            storage_write.flusher()()?;
 
             // Keep the guard till here to prevent concurrent drop/flushes
             // We don't touch files from here on and can drop the alive guard
