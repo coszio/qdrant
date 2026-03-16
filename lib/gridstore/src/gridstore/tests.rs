@@ -731,6 +731,49 @@ fn test_payload_compression() {
     assert_eq!(payload, decompressed_payload);
 }
 
+/// Validate that `compress_lz4` (which reuses a `CompressTable` via thread-local) produces
+/// output byte-equivalent to `lz4_flex::compress_prepend_size`.
+#[test]
+fn test_compress_lz4_equivalent_to_compress_prepend_size() {
+    let mut rng = rand::make_rng::<rand::rngs::SmallRng>();
+
+    let test_cases: Vec<Vec<u8>> = vec![
+        // empty
+        vec![],
+        // tiny
+        vec![42],
+        // small payload
+        random_payload(&mut rng, 2).to_bytes(),
+        // larger payload
+        random_payload(&mut rng, 20).to_bytes(),
+        // highly compressible (repeated bytes)
+        vec![0xAB; 10_000],
+        // incompressible (random bytes)
+        {
+            let mut buf = vec![0u8; 10_000];
+            rng.fill(&mut buf[..]);
+            buf
+        },
+    ];
+
+    for (i, input) in test_cases.iter().enumerate() {
+        let reusable = compress_lz4(input);
+        let reference = lz4_flex::compress_prepend_size(input);
+        assert_eq!(
+            reusable, reference,
+            "compress_lz4 output differs from compress_prepend_size for test case {i} (len={})",
+            input.len(),
+        );
+        // Also verify round-trip
+        let decompressed = decompress_lz4(&reusable);
+        assert_eq!(
+            &decompressed, input,
+            "round-trip failed for test case {i} (len={})",
+            input.len(),
+        );
+    }
+}
+
 #[rstest]
 #[case(128)]
 #[case(256)]
