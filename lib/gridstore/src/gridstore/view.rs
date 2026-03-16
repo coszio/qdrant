@@ -1,9 +1,10 @@
+use std::cell::RefCell;
 use std::ops::ControlFlow;
 
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::referenced_counter::HwMetricRefCounter;
 use common::universal_io::UniversalRead;
-use lz4_flex::compress_prepend_size;
+use lz4_flex::block::{CompressTable, compress_into_with_table, get_maximum_output_size};
 
 use crate::Result;
 use crate::blob::Blob;
@@ -12,9 +13,22 @@ use crate::error::GridstoreError;
 use crate::pages::Pages;
 use crate::tracker::{PointOffset, Tracker, ValuePointer};
 
+thread_local! {
+    static LZ4_COMPRESS_TABLE: RefCell<CompressTable> = RefCell::new(CompressTable::default());
+}
+
 #[inline]
 pub(super) fn compress_lz4(value: &[u8]) -> Vec<u8> {
-    compress_prepend_size(value)
+    let max_compressed = get_maximum_output_size(value.len());
+    // 4 bytes for the prepended uncompressed size (little-endian u32), matching lz4_flex format.
+    let mut output = vec![0u8; 4 + max_compressed];
+    output[..4].copy_from_slice(&(value.len() as u32).to_le_bytes());
+    let compressed_len = LZ4_COMPRESS_TABLE.with(|table| {
+        compress_into_with_table(value, &mut output[4..], &mut table.borrow_mut())
+            .expect("lz4 compression failed: output buffer too small")
+    });
+    output.truncate(4 + compressed_len);
+    output
 }
 
 #[inline]
