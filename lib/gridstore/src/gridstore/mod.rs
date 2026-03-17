@@ -4,7 +4,7 @@ mod tests;
 pub(crate) mod view;
 
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ahash::AHashMap;
@@ -23,11 +23,17 @@ pub use view::GridstoreView;
 
 use crate::bitmask::Bitmask;
 use crate::blob::Blob;
-use crate::config::{StorageConfig, StorageOptions};
+use crate::config::{Compression, StorageConfig, StorageOptions};
 use crate::error::GridstoreError;
 use crate::pages::{Pages, page_path};
 use crate::tracker::{BlockOffset, PageId, PointOffset, PointerUpdates, ValuePointer};
 use crate::{Result, Tracker};
+
+const DICT_FILENAME: &str = "dict.bin";
+
+pub(crate) fn dict_path(base_path: &Path) -> PathBuf {
+    base_path.join(DICT_FILENAME)
+}
 
 pub type Flusher = Box<dyn FnOnce() -> std::result::Result<(), GridstoreError> + Send>;
 
@@ -45,6 +51,8 @@ pub struct Gridstore<V> {
     /// 0 is free, 1 is used.
     pub(super) bitmask: Arc<RwLock<Bitmask>>,
     pub(super) base_path: PathBuf,
+    /// In-memory dictionary for LZ4Dict compression. Loaded once from `dict.bin` and shared.
+    pub(super) dictionary: Option<Arc<Vec<u8>>>,
     pub(super) _value_type: std::marker::PhantomData<V>,
     /// Lock to prevent concurrent flushes and used for waiting for ongoing flushes to finish.
     is_alive_flush_lock: IsAliveLock,
@@ -55,7 +63,8 @@ impl<V: Blob> Gridstore<V> {
     fn with_view<R>(&self, f: impl FnOnce(GridstoreView<'_, V, MmapUniversal<u8>>) -> R) -> R {
         let pages = self.pages.read();
         let tracker = self.tracker.read();
-        f(GridstoreView::new(&self.config, &tracker, &pages))
+        let dict = self.dictionary.as_deref().map(|d| d.as_slice());
+        f(GridstoreView::new(&self.config, &tracker, &pages, dict))
     }
 
     /// List all files belonging to this storage (tracker, pages, bitmask, config).
@@ -72,6 +81,10 @@ impl<V: Blob> Gridstore<V> {
             paths.push(pages.page_path(page_id));
         }
         paths.push(self.base_path.join(CONFIG_FILENAME));
+        let dict = dict_path(&self.base_path);
+        if dict.exists() {
+            paths.push(dict);
+        }
         for bitmask_file in self.bitmask.read().files() {
             paths.push(bitmask_file);
         }
@@ -79,7 +92,12 @@ impl<V: Blob> Gridstore<V> {
     }
 
     pub fn immutable_files(&self) -> Vec<PathBuf> {
-        vec![self.base_path.join(CONFIG_FILENAME)]
+        let mut files = vec![self.base_path.join(CONFIG_FILENAME)];
+        let dict = dict_path(&self.base_path);
+        if dict.exists() {
+            files.push(dict);
+        }
+        files
     }
 
     /// Opens an existing storage, or initializes a new one.
@@ -105,8 +123,18 @@ impl<V: Blob> Gridstore<V> {
     /// `base_path` is the directory where the storage files will be stored.
     /// It should exist already.
     pub fn new(base_path: PathBuf, options: StorageOptions) -> Result<Self> {
+        let dictionary = options.dictionary.clone();
         let config = StorageConfig::try_from(options).map_err(GridstoreError::service_error)?;
         let config_path = base_path.join(CONFIG_FILENAME);
+
+        // Persist dictionary to disk if provided.
+        if let Some(ref dict) = dictionary {
+            fs::write(dict_path(&base_path), dict.as_slice()).map_err(|err| {
+                GridstoreError::service_error(format!(
+                    "Failed to write dictionary file: {err}"
+                ))
+            })?;
+        }
 
         let bitmask = Bitmask::create(&base_path, config.clone())?;
 
@@ -115,6 +143,7 @@ impl<V: Blob> Gridstore<V> {
             pages: Arc::new(RwLock::new(Pages::new(base_path.clone()))),
             base_path,
             config,
+            dictionary,
             _value_type: std::marker::PhantomData,
             bitmask: Arc::new(RwLock::new(bitmask)),
             is_alive_flush_lock: IsAliveLock::new(),
@@ -148,12 +177,26 @@ impl<V: Blob> Gridstore<V> {
             )));
         }
 
+        // Load dictionary from disk if compression requires it.
+        let dictionary = if config.compression == Compression::LZ4Dict {
+            let path = dict_path(&base_path);
+            let data = fs::read(&path).map_err(|err| {
+                GridstoreError::service_error(format!(
+                    "Failed to read dictionary file at {path:?}: {err}"
+                ))
+            })?;
+            Some(Arc::new(data))
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             tracker: Arc::new(RwLock::new(tracker)),
             pages: Arc::new(RwLock::new(pages)),
             bitmask: Arc::new(RwLock::new(bitmask)),
             base_path,
+            dictionary,
             _value_type: std::marker::PhantomData,
             is_alive_flush_lock: IsAliveLock::new(),
         })
@@ -320,7 +363,8 @@ impl<V: Blob> Gridstore<V> {
     ///
     /// Completely wipes the storage, and recreates it with a single empty page.
     pub fn clear(&mut self) -> Result<()> {
-        let create_options = StorageOptions::from(&self.config);
+        let mut create_options = StorageOptions::from(&self.config);
+        create_options.dictionary = self.dictionary.clone();
         let base_path = self.base_path.clone();
 
         self.is_alive_flush_lock.blocking_mark_dead();

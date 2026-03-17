@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
@@ -33,6 +34,14 @@ pub struct MmapPayloadStorage {
 
 impl MmapPayloadStorage {
     pub fn open_or_create(path: PathBuf, populate: bool) -> OperationResult<Self> {
+        Self::open_or_create_with_dictionary(path, populate, None)
+    }
+
+    pub fn open_or_create_with_dictionary(
+        path: PathBuf,
+        populate: bool,
+        dictionary: Option<Arc<Vec<u8>>>,
+    ) -> OperationResult<Self> {
         let path = storage_dir(path);
         if path.exists() {
             Self::open(path, populate)
@@ -41,7 +50,7 @@ impl MmapPayloadStorage {
             fs::create_dir_all(&path).map_err(|_| {
                 OperationError::service_error("Failed to create mmap payload storage directory")
             })?;
-            Ok(Self::new(path, populate)?)
+            Ok(Self::new(path, populate, dictionary)?)
         }
     }
 
@@ -57,8 +66,16 @@ impl MmapPayloadStorage {
         Ok(Self { storage, populate })
     }
 
-    fn new(path: PathBuf, populate: bool) -> OperationResult<Self> {
-        let storage = Gridstore::new(path, StorageOptions::default())?;
+    fn new(
+        path: PathBuf,
+        populate: bool,
+        dictionary: Option<Arc<Vec<u8>>>,
+    ) -> OperationResult<Self> {
+        let options = StorageOptions {
+            dictionary,
+            ..StorageOptions::default()
+        };
+        let storage = Gridstore::new(path, options)?;
 
         if populate {
             storage.populate()?;

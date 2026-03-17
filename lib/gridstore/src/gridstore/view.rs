@@ -4,7 +4,10 @@ use std::ops::ControlFlow;
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::referenced_counter::HwMetricRefCounter;
 use common::universal_io::UniversalRead;
-use lz4_flex::block::{CompressTable, compress_into_with_table, get_maximum_output_size};
+use lz4_flex::block::{
+    CompressTable, compress_into_with_table, compress_prepend_size_with_dict,
+    decompress_size_prepended_with_dict, get_maximum_output_size,
+};
 
 use crate::Result;
 use crate::blob::Blob;
@@ -47,6 +50,8 @@ pub struct GridstoreView<'a, V, S: UniversalRead<u8>> {
     pub(super) config: &'a StorageConfig,
     pub(super) tracker: &'a Tracker<S>,
     pub(super) pages: &'a Pages<S>,
+    /// Reference to the in-memory dictionary for LZ4Dict compression.
+    pub(super) dictionary: Option<&'a [u8]>,
     pub(super) _value_type: std::marker::PhantomData<V>,
 }
 
@@ -55,11 +60,13 @@ impl<'a, V, S: UniversalRead<u8>> GridstoreView<'a, V, S> {
         config: &'a StorageConfig,
         tracker: &'a Tracker<S>,
         pages: &'a Pages<S>,
+        dictionary: Option<&'a [u8]>,
     ) -> Self {
         Self {
             config,
             tracker,
             pages,
+            dictionary,
             _value_type: std::marker::PhantomData,
         }
     }
@@ -92,6 +99,12 @@ impl<'a, V: Blob, S: UniversalRead<u8>> GridstoreView<'a, V, S> {
         match self.config.compression {
             Compression::None => value,
             Compression::LZ4 => compress_lz4(&value),
+            Compression::LZ4Dict => {
+                let dict = self
+                    .dictionary
+                    .expect("LZ4Dict compression requires a dictionary");
+                compress_prepend_size_with_dict(&value, dict)
+            }
         }
     }
 
@@ -99,6 +112,12 @@ impl<'a, V: Blob, S: UniversalRead<u8>> GridstoreView<'a, V, S> {
         match self.config.compression {
             Compression::None => value,
             Compression::LZ4 => decompress_lz4(&value),
+            Compression::LZ4Dict => {
+                let dict = self
+                    .dictionary
+                    .expect("LZ4Dict decompression requires a dictionary");
+                decompress_size_prepended_with_dict(&value, dict).unwrap()
+            }
         }
     }
 

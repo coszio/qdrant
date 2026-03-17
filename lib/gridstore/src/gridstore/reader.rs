@@ -1,14 +1,17 @@
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::referenced_counter::HwMetricRefCounter;
 use common::universal_io::mmap::{MmapUniversal, MmapUniversalRo};
 use common::universal_io::read_json_via;
+use fs_err as fs;
 
+use super::dict_path;
 use super::view::GridstoreView;
 use crate::blob::Blob;
-use crate::config::StorageConfig;
+use crate::config::{Compression, StorageConfig};
 use crate::error::GridstoreError;
 use crate::pages::Pages;
 use crate::tracker::{PageId, PointOffset};
@@ -26,13 +29,16 @@ pub struct GridstoreReader<V> {
     pub(super) tracker: Tracker,
     pub(super) pages: Pages<MmapUniversal<u8>>,
     pub(super) base_path: PathBuf,
+    /// In-memory dictionary for LZ4Dict compression. Loaded once from `dict.bin` and shared.
+    pub(super) dictionary: Option<Arc<Vec<u8>>>,
     pub(super) _value_type: std::marker::PhantomData<V>,
 }
 
 impl<V: Blob> GridstoreReader<V> {
     /// Create a [`GridstoreView`] borrowing this reader's data.
     pub fn view(&self) -> GridstoreView<'_, V, MmapUniversal<u8>> {
-        GridstoreView::new(&self.config, &self.tracker, &self.pages)
+        let dict = self.dictionary.as_deref().map(|d| d.as_slice());
+        GridstoreView::new(&self.config, &self.tracker, &self.pages, dict)
     }
 
     /// List all files belonging to this reader (tracker, pages, config).
@@ -48,6 +54,10 @@ impl<V: Blob> GridstoreReader<V> {
             paths.push(self.page_path(page_id));
         }
         paths.push(self.base_path.join(CONFIG_FILENAME));
+        let dict = dict_path(&self.base_path);
+        if dict.exists() {
+            paths.push(dict);
+        }
         paths
     }
 
@@ -63,11 +73,25 @@ impl<V: Blob> GridstoreReader<V> {
 
         let pages = Pages::<MmapUniversal<u8>>::open(&base_path)?;
 
+        // Load dictionary from disk if compression requires it.
+        let dictionary = if config.compression == Compression::LZ4Dict {
+            let path = dict_path(&base_path);
+            let data = fs::read(&path).map_err(|err| {
+                GridstoreError::service_error(format!(
+                    "Failed to read dictionary file at {path:?}: {err}"
+                ))
+            })?;
+            Some(Arc::new(data))
+        } else {
+            None
+        };
+
         Ok(Self {
             tracker,
             config,
             pages,
             base_path,
+            dictionary,
             _value_type: std::marker::PhantomData,
         })
     }
