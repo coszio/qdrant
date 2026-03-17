@@ -6,12 +6,11 @@ use common::counter::hardware_counter::HardwareCounterCell;
 use common::counter::referenced_counter::HwMetricRefCounter;
 use common::universal_io::mmap::{MmapUniversal, MmapUniversalRo};
 use common::universal_io::read_json_via;
-use fs_err as fs;
 
-use super::dict_path;
+use super::{dict_path, load_dictionary};
 use super::view::GridstoreView;
 use crate::blob::Blob;
-use crate::config::{Compression, StorageConfig};
+use crate::config::StorageConfig;
 use crate::error::GridstoreError;
 use crate::pages::Pages;
 use crate::tracker::{PageId, PointOffset};
@@ -73,18 +72,7 @@ impl<V: Blob> GridstoreReader<V> {
 
         let pages = Pages::<MmapUniversal<u8>>::open(&base_path)?;
 
-        // Load dictionary from disk if compression requires it.
-        let dictionary = if config.compression == Compression::LZ4Dict {
-            let path = dict_path(&base_path);
-            let data = fs::read(&path).map_err(|err| {
-                GridstoreError::service_error(format!(
-                    "Failed to read dictionary file at {path:?}: {err}"
-                ))
-            })?;
-            Some(Arc::new(data))
-        } else {
-            None
-        };
+        let dictionary = load_dictionary(&base_path, &config)?;
 
         Ok(Self {
             tracker,

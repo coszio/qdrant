@@ -29,7 +29,7 @@ impl Blob for Payload {
 /// Create an empty storage with the default configuration
 pub fn empty_storage() -> (TempDir, Gridstore<Payload>) {
     let dir = Builder::new().prefix("test-storage").tempdir().unwrap();
-    let storage = Gridstore::new(dir.path().to_path_buf(), Default::default(), None).unwrap();
+    let storage = Gridstore::new(dir.path().to_path_buf(), Default::default()).unwrap();
     (dir, storage)
 }
 
@@ -44,7 +44,7 @@ pub fn empty_storage_sized(
         compression: Some(compression),
         ..Default::default()
     };
-    let storage = Gridstore::new(dir.path().to_path_buf(), options, None).unwrap();
+    let storage = Gridstore::new(dir.path().to_path_buf(), options).unwrap();
     (dir, storage)
 }
 
