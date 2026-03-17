@@ -42,20 +42,20 @@ pub(crate) fn dict_path(base_path: &Path) -> PathBuf {
 /// Build a compression dictionary from serialized value samples.
 ///
 /// LZ4 dictionary compression works by treating the dictionary as prior history — the compressor
-/// can reference matches in it. The last 64KB of the dictionary matters most, as that's LZ4's
-/// maximum match distance.
+/// can reference matches in it. The dictionary is capped at 64KB, which is LZ4's maximum match
+/// distance.
 ///
 /// Takes an iterator of serialized byte slices (e.g., JSON-encoded payloads) and concatenates
-/// them, keeping only the final 64KB.
+/// them up to the 64KB limit.
 pub fn build_dictionary<'a>(samples: impl Iterator<Item = &'a [u8]>) -> Vec<u8> {
-    let mut dict = Vec::new();
+    let mut dict = Vec::with_capacity(MAX_DICT_SIZE);
     for sample in samples {
-        dict.extend_from_slice(sample);
-    }
-    // Keep only the last 64KB — LZ4 can't reference anything beyond that.
-    if dict.len() > MAX_DICT_SIZE {
-        let start = dict.len() - MAX_DICT_SIZE;
-        dict.drain(..start);
+        let remaining = MAX_DICT_SIZE - dict.len();
+        if remaining == 0 {
+            break;
+        }
+        let slice = &sample[..sample.len().min(remaining)];
+        dict.extend_from_slice(slice);
     }
     dict
 }
