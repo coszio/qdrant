@@ -394,7 +394,11 @@ fn default_value(value: &Value) -> Value {
 fn collect_strings(value: &Value, counts: &mut HashMap<String, usize>) {
     match value {
         Value::String(s) => {
-            *counts.entry(s.clone()).or_default() += 1;
+            if let Some(count) = counts.get_mut(s.as_str()) {
+                *count += 1;
+            } else {
+                counts.insert(s.clone(), 1);
+            }
         }
         Value::Array(arr) => {
             for elem in arr {

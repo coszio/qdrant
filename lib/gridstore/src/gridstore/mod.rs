@@ -473,9 +473,7 @@ impl<V: Blob> Gridstore<V> {
 
         Ok(())
     }
-}
 
-impl<V: Blob> Gridstore<V> {
     /// Optimize compression by switching from plain LZ4 to LZ4 with a trained dictionary.
     ///
     /// This is a no-op when the storage already uses `LZ4Dict` (or `None`).
@@ -507,7 +505,9 @@ impl<V: Blob> Gridstore<V> {
         // --- 2. Create new storage with LZ4Dict in a tmp directory ------------------
         let base_path = self.base_path.clone();
         let tmp_dir = tempfile::tempdir_in(base_path.parent().unwrap_or(Path::new(".")))
-            .map_err(|e| GridstoreError::service_error(format!("Failed to create temp dir: {e}")))?;
+            .map_err(|e| {
+                GridstoreError::service_error(format!("Failed to create temp dir: {e}"))
+            })?;
         let tmp_path = tmp_dir.path().to_path_buf();
 
         Self::write_dictionary(&tmp_path, &dictionary)?;
