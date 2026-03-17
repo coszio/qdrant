@@ -85,6 +85,9 @@ impl MmapPayloadStorage {
     /// Maximum number of payloads sampled for dictionary training.
     const DICT_SAMPLE_SIZE: usize = 1000;
 
+    /// LZ4 only uses the last 64KB of the dictionary for matching.
+    const MAX_DICT_SIZE: usize = 64 * 1024;
+
     /// Optimize compression by switching from plain LZ4 to LZ4 with a trained dictionary.
     ///
     /// This is a no-op when the storage already uses `LZ4Dict` (or `None`).
@@ -124,7 +127,9 @@ impl MmapPayloadStorage {
                 merge_into_schema(&mut schema, &Value::Object(payload.0));
             }
         }
-        let dictionary = serde_json::to_vec(&schema).unwrap_or_default();
+        let mut dictionary = serde_json::to_vec(&schema).unwrap_or_default();
+        // LZ4 only uses the last 64KB of the dictionary for matching.
+        dictionary.truncate(Self::MAX_DICT_SIZE);
 
         // --- 2. Create new storage with LZ4Dict in a tmp directory ------------------
         let base_path = self.storage.base_path().to_path_buf();
