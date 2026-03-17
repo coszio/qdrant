@@ -31,34 +31,8 @@ use crate::{Result, Tracker};
 
 const DICT_FILENAME: &str = "dict.bin";
 
-/// Maximum dictionary size for LZ4. The compressor only uses the last 64KB of the dictionary
-/// for matching, so there's no benefit to exceeding this.
-const MAX_DICT_SIZE: usize = 64 * 1024;
-
 pub(crate) fn dict_path(base_path: &Path) -> PathBuf {
     base_path.join(DICT_FILENAME)
-}
-
-/// Build a compression dictionary from serialized value samples.
-///
-/// LZ4 dictionary compression works by treating the dictionary as prior history — the compressor
-/// can reference matches in it. The dictionary is capped at 64KB, which is LZ4's maximum match
-/// distance.
-///
-/// Takes an iterator of serialized byte slices (e.g., JSON-encoded payloads) and concatenates
-/// them up to the 64KB limit.
-pub fn build_dictionary(samples: impl Iterator<Item = impl AsRef<[u8]>>) -> Vec<u8> {
-    let mut dict = Vec::with_capacity(MAX_DICT_SIZE);
-    for sample in samples {
-        let sample = sample.as_ref();
-        let remaining = MAX_DICT_SIZE - dict.len();
-        if remaining == 0 {
-            break;
-        }
-        let slice = &sample[..sample.len().min(remaining)];
-        dict.extend_from_slice(slice);
-    }
-    dict
 }
 
 /// Load dictionary from disk if the config specifies LZ4Dict compression.

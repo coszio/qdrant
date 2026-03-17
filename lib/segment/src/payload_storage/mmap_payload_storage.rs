@@ -4,10 +4,10 @@ use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
 use fs_err as fs;
 use gridstore::config::{Compression, StorageOptions};
-use gridstore::{Blob, Gridstore, build_dictionary};
+use gridstore::{Blob, Gridstore};
 use rand::Rng;
 use rand::seq::index::sample as sample_indices;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::common::Flusher;
 use crate::common::operation_error::{OperationError, OperationResult};
@@ -113,13 +113,18 @@ impl MmapPayloadStorage {
         let sample_count = Self::DICT_SAMPLE_SIZE.min(max_offset as usize);
         let indices = sample_indices(rng, max_offset as usize, sample_count);
 
-        let dictionary = build_dictionary(indices.iter().filter_map(|idx| {
-            self.storage
+        let mut schema = Value::Object(Map::new());
+        for idx in indices.iter() {
+            if let Some(payload) = self
+                .storage
                 .get_value::<false>(idx as PointOffsetType, &hw_counter)
                 .ok()
                 .flatten()
-                .map(|p| p.to_bytes())
-        }));
+            {
+                merge_into_schema(&mut schema, &Value::Object(payload.0));
+            }
+        }
+        let dictionary = serde_json::to_vec(&schema).unwrap_or_default();
 
         // --- 2. Create new storage with LZ4Dict in a tmp directory ------------------
         let base_path = self.storage.base_path().to_path_buf();
@@ -351,4 +356,54 @@ impl PayloadStorage for MmapPayloadStorage {
 /// Get storage directory for this payload storage
 pub fn storage_dir<P: AsRef<Path>>(segment_path: P) -> PathBuf {
     segment_path.as_ref().join(STORAGE_PATH)
+}
+
+/// Merge a JSON value into a schema that keeps only structure and default values.
+///
+/// Objects are merged by unioning their keys. Arrays keep a single representative
+/// element. Leaf values are replaced with type-appropriate defaults.
+fn merge_into_schema(schema: &mut Value, sample: &Value) {
+    match (schema, sample) {
+        (Value::Object(schema_map), Value::Object(sample_map)) => {
+            for (key, value) in sample_map {
+                match schema_map.get_mut(key) {
+                    Some(existing) => merge_into_schema(existing, value),
+                    None => {
+                        schema_map.insert(key.clone(), default_value(value));
+                    }
+                }
+            }
+        }
+        (Value::Array(schema_arr), Value::Array(sample_arr)) => {
+            if let Some(sample_elem) = sample_arr.first() {
+                if schema_arr.is_empty() {
+                    schema_arr.push(default_value(sample_elem));
+                } else {
+                    merge_into_schema(&mut schema_arr[0], sample_elem);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Produce a default value mirroring the structure of `value` with zeroed leaves.
+fn default_value(value: &Value) -> Value {
+    match value {
+        Value::Null => Value::Null,
+        Value::Bool(_) => Value::Bool(false),
+        Value::Number(_) => Value::Number(0.into()),
+        Value::String(_) => Value::String(String::new()),
+        Value::Array(arr) => match arr.first() {
+            Some(elem) => Value::Array(vec![default_value(elem)]),
+            None => Value::Array(vec![]),
+        },
+        Value::Object(map) => {
+            let new_map = map
+                .iter()
+                .map(|(k, v)| (k.clone(), default_value(v)))
+                .collect();
+            Value::Object(new_map)
+        }
+    }
 }
