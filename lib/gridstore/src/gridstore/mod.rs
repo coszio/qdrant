@@ -475,6 +475,92 @@ impl<V: Blob> Gridstore<V> {
     }
 }
 
+impl<V: Blob> Gridstore<V> {
+    /// Optimize compression by switching from plain LZ4 to LZ4 with a trained dictionary.
+    ///
+    /// This is a no-op when the storage already uses `LZ4Dict` (or `None`).
+    ///
+    /// `build_dict` receives a reference to this storage and must return the raw
+    /// dictionary bytes. The caller decides how to sample data and build the
+    /// dictionary (e.g. merging JSON schemas, raw concatenation, etc.).
+    ///
+    /// The method:
+    /// 1. Calls `build_dict` to obtain a dictionary.
+    /// 2. Creates a secondary storage with `LZ4Dict` in a temporary directory.
+    /// 3. Rewrites every value into the new storage.
+    /// 4. Swaps the directories so the optimized storage takes over.
+    pub fn optimize(&mut self, build_dict: impl FnOnce(&Self) -> Vec<u8>) -> Result<()> {
+        if self.compression() != Compression::LZ4 {
+            return Ok(());
+        }
+
+        let max_offset = self.max_point_offset();
+        if max_offset == 0 {
+            return Ok(());
+        }
+
+        let hw_counter = HardwareCounterCell::disposable();
+
+        // --- 1. Build dictionary via caller-supplied closure -------------------------
+        let dictionary = build_dict(self);
+
+        // --- 2. Create new storage with LZ4Dict in a tmp directory ------------------
+        let base_path = self.base_path.clone();
+        let tmp_dir = tempfile::tempdir_in(base_path.parent().unwrap_or(Path::new(".")))
+            .map_err(|e| GridstoreError::service_error(format!("Failed to create temp dir: {e}")))?;
+        let tmp_path = tmp_dir.path().to_path_buf();
+
+        Self::write_dictionary(&tmp_path, &dictionary)?;
+
+        let options = StorageOptions {
+            compression: Some(Compression::LZ4Dict),
+            ..StorageOptions::default()
+        };
+        let mut new_storage = Self::new(tmp_path.clone(), options)?;
+
+        // --- 3. Rewrite all values --------------------------------------------------
+        self.iter(
+            |point_id, value: V| -> std::result::Result<bool, GridstoreError> {
+                new_storage.put_value(
+                    point_id,
+                    &value,
+                    hw_counter.ref_payload_io_write_counter(),
+                )?;
+                Ok(true)
+            },
+            hw_counter.ref_payload_io_read_counter(),
+        )?;
+
+        new_storage.flusher()()?;
+
+        // --- 4. Swap directories ----------------------------------------------------
+        let old_path = base_path.with_extension("lz4_old");
+        if old_path.exists() {
+            fs::remove_dir_all(&old_path).map_err(|e| {
+                GridstoreError::service_error(format!("Failed to remove old path: {e}"))
+            })?;
+        }
+
+        // Old storage must be dropped before renaming its directory.
+        drop(std::mem::replace(self, new_storage));
+
+        fs::rename(&base_path, &old_path).map_err(|e| {
+            GridstoreError::service_error(format!("Failed to rename base path: {e}"))
+        })?;
+        fs::rename(&tmp_path, &base_path).map_err(|e| {
+            GridstoreError::service_error(format!("Failed to rename tmp path: {e}"))
+        })?;
+        fs::remove_dir_all(&old_path).map_err(|e| {
+            GridstoreError::service_error(format!("Failed to remove old path: {e}"))
+        })?;
+
+        // Reopen from the final location.
+        *self = Self::open(base_path)?;
+
+        Ok(())
+    }
+}
+
 impl<V> Gridstore<V> {
     /// Returns the compression method used by this storage.
     pub fn compression(&self) -> Compression {

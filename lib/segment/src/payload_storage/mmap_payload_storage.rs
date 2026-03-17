@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
 use fs_err as fs;
-use gridstore::config::{Compression, StorageOptions};
+use gridstore::config::StorageOptions;
 use gridstore::{Blob, Gridstore};
 use rand::Rng;
 use rand::seq::index::sample as sample_indices;
@@ -96,114 +96,71 @@ impl MmapPayloadStorage {
     ///
     /// This is a no-op when the storage already uses `LZ4Dict` (or `None`).
     ///
-    /// The method:
-    /// 1. Samples up to 1000 random payloads and trains a dictionary.
-    /// 2. Creates a secondary storage with `LZ4Dict` in a temporary directory.
-    /// 3. Rewrites every payload into the new storage.
-    /// 4. Swaps the directories so the optimized storage takes over.
+    /// Samples up to 1000 random payloads, merges their JSON schemas into a compact
+    /// dictionary (keys + top-100 frequent string values), then delegates the
+    /// rewrite-and-swap to [`Gridstore::optimize`].
     pub fn optimize<R: Rng + ?Sized>(
         &mut self,
         rng: &mut R,
     ) -> OperationResult<()> {
-        if self.storage.compression() != Compression::LZ4 {
-            return Ok(());
-        }
+        let sample_count = Self::DICT_SAMPLE_SIZE;
+        let max_dict_size = Self::MAX_DICT_SIZE;
+        let top_string_count = Self::TOP_STRING_COUNT;
 
-        let hw_counter = HardwareCounterCell::disposable();
-
-        // --- 1. Sample payloads and build dictionary --------------------------------
+        // Pre-generate the sampled indices so the closure doesn't need the rng.
         let max_offset = self.storage.max_point_offset();
         if max_offset == 0 {
             return Ok(());
         }
+        let indices: Vec<PointOffsetType> = sample_indices(
+            rng,
+            max_offset as usize,
+            sample_count.min(max_offset as usize),
+        )
+        .iter()
+        .map(|i| i as PointOffsetType)
+        .collect();
 
-        let sample_count = Self::DICT_SAMPLE_SIZE.min(max_offset as usize);
-        let indices = sample_indices(rng, max_offset as usize, sample_count);
+        self.storage
+            .optimize(|storage| {
+                let hw_counter = HardwareCounterCell::disposable();
 
-        let mut schema = Value::Object(Map::new());
-        let mut string_counts: HashMap<String, usize> = HashMap::new();
-        for idx in indices.iter() {
-            if let Some(payload) = self
-                .storage
-                .get_value::<false>(idx as PointOffsetType, &hw_counter)
-                .ok()
-                .flatten()
-            {
-                let value = Value::Object(payload.0);
-                collect_strings(&value, &mut string_counts);
-                merge_into_schema(&mut schema, &value);
-            }
-        }
+                let mut schema = Value::Object(Map::new());
+                let mut string_counts: HashMap<String, usize> = HashMap::new();
 
-        // Inject the top 100 most frequent string values into the schema so LZ4
-        // can match against common payload values, not just keys.
-        let top_strings = top_n_strings(&string_counts, Self::TOP_STRING_COUNT);
-        if !top_strings.is_empty() {
-            if let Value::Object(map) = &mut schema {
-                map.insert(
-                    String::new(),
-                    Value::Array(top_strings.into_iter().map(Value::String).collect()),
-                );
-            }
-        }
+                for &idx in &indices {
+                    if let Some(payload) = storage
+                        .get_value::<false>(idx, &hw_counter)
+                        .ok()
+                        .flatten()
+                    {
+                        let value = Value::Object(payload.0);
+                        collect_strings(&value, &mut string_counts);
+                        merge_into_schema(&mut schema, &value);
+                    }
+                }
 
-        let mut dictionary = serde_json::to_vec(&schema).unwrap_or_default();
-        // LZ4 only uses the last 64KB of the dictionary for matching.
-        dictionary.truncate(Self::MAX_DICT_SIZE);
+                // Inject the top most frequent string values so LZ4 can match
+                // against common payload values, not just keys.
+                let top_strings = top_n_strings(&string_counts, top_string_count);
+                if !top_strings.is_empty() {
+                    if let Value::Object(map) = &mut schema {
+                        map.insert(
+                            String::new(),
+                            Value::Array(
+                                top_strings.into_iter().map(Value::String).collect(),
+                            ),
+                        );
+                    }
+                }
 
-        // --- 2. Create new storage with LZ4Dict in a tmp directory ------------------
-        let base_path = self.storage.base_path().to_path_buf();
-        let tmp_dir = tempfile::tempdir_in(base_path.parent().unwrap_or(Path::new(".")))?;
-        let tmp_path = tmp_dir.path().to_path_buf();
-
-        Gridstore::<Payload>::write_dictionary(&tmp_path, &dictionary)?;
-
-        let options = StorageOptions {
-            compression: Some(Compression::LZ4Dict),
-            ..StorageOptions::default()
-        };
-        let mut new_storage = Gridstore::<Payload>::new(tmp_path.clone(), options)?;
-
-        // --- 3. Rewrite all payloads ------------------------------------------------
-        self.storage.iter(
-            |point_id, payload: Payload| -> OperationResult<bool> {
-                new_storage.put_value(
-                    point_id,
-                    &payload,
-                    hw_counter.ref_payload_io_write_counter(),
-                )?;
-                Ok(true)
-            },
-            hw_counter.ref_payload_io_read_counter(),
-        )?;
-
-        new_storage.flusher()().map_err(|e| {
-            OperationError::service_error(format!("Failed to flush new storage: {e}"))
-        })?;
-
-        // --- 4. Swap directories ----------------------------------------------------
-        let old_path = base_path.with_extension("lz4_old");
-        if old_path.exists() {
-            fs::remove_dir_all(&old_path)?;
-        }
-
-        // old storage must be dropped before renaming its directory
-        drop(std::mem::replace(
-            &mut self.storage,
-            new_storage,
-        ));
-
-        // base_path -> old_path, tmp_path -> base_path
-        fs::rename(&base_path, &old_path)?;
-        fs::rename(&tmp_path, &base_path)?;
-        fs::remove_dir_all(&old_path)?;
-
-        // Reopen from the final location
-        self.storage = Gridstore::open(base_path).map_err(|err| {
-            OperationError::service_error(format!(
-                "Failed to reopen optimized payload storage: {err}"
-            ))
-        })?;
+                let mut dict = serde_json::to_vec(&schema).unwrap_or_default();
+                dict.truncate(max_dict_size);
+                dict
+            })
+            .map_err(|e| {
+                OperationError::service_error(format!("Failed to optimize payload storage: {e}"))
+            })?;
 
         if self.populate {
             self.storage.populate()?;
