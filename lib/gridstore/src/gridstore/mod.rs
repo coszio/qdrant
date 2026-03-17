@@ -47,9 +47,10 @@ pub(crate) fn dict_path(base_path: &Path) -> PathBuf {
 ///
 /// Takes an iterator of serialized byte slices (e.g., JSON-encoded payloads) and concatenates
 /// them up to the 64KB limit.
-pub fn build_dictionary<'a>(samples: impl Iterator<Item = &'a [u8]>) -> Vec<u8> {
+pub fn build_dictionary(samples: impl Iterator<Item = impl AsRef<[u8]>>) -> Vec<u8> {
     let mut dict = Vec::with_capacity(MAX_DICT_SIZE);
     for sample in samples {
+        let sample = sample.as_ref();
         let remaining = MAX_DICT_SIZE - dict.len();
         if remaining == 0 {
             break;

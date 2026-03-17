@@ -113,17 +113,13 @@ impl MmapPayloadStorage {
         let sample_count = Self::DICT_SAMPLE_SIZE.min(max_offset as usize);
         let indices = sample_indices(rng, max_offset as usize, sample_count);
 
-        let mut samples: Vec<Vec<u8>> = Vec::with_capacity(sample_count);
-        for idx in indices {
-            if let Some(payload) = self
-                .storage
-                .get_value::<false>(idx as PointOffsetType, &hw_counter)?
-            {
-                samples.push(payload.to_bytes());
-            }
-        }
-
-        let dictionary = build_dictionary(samples.iter().map(|s| s.as_slice()));
+        let dictionary = build_dictionary(indices.iter().filter_map(|idx| {
+            self.storage
+                .get_value::<false>(idx as PointOffsetType, &hw_counter)
+                .ok()
+                .flatten()
+                .map(|p| p.to_bytes())
+        }));
 
         // --- 2. Create new storage with LZ4Dict in a tmp directory ------------------
         let base_path = self.storage.base_path().to_path_buf();
