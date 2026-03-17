@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
 use fs_err as fs;
-use gridstore::config::StorageOptions;
-use gridstore::{Blob, Gridstore};
+use gridstore::config::{Compression, StorageOptions};
+use gridstore::{Blob, Gridstore, build_dictionary};
+use rand::Rng;
+use rand::seq::index::sample as sample_indices;
 use serde_json::Value;
 
 use crate::common::Flusher;
@@ -77,6 +79,115 @@ impl MmapPayloadStorage {
     /// Drop disk cache.
     pub fn clear_cache(&self) -> OperationResult<()> {
         self.storage.clear_cache()?;
+        Ok(())
+    }
+
+    /// Maximum number of payloads sampled for dictionary training.
+    const DICT_SAMPLE_SIZE: usize = 1000;
+
+    /// Optimize compression by switching from plain LZ4 to LZ4 with a trained dictionary.
+    ///
+    /// This is a no-op when the storage already uses `LZ4Dict` (or `None`).
+    ///
+    /// The method:
+    /// 1. Samples up to 1000 random payloads and trains a dictionary.
+    /// 2. Creates a secondary storage with `LZ4Dict` in a temporary directory.
+    /// 3. Rewrites every payload into the new storage.
+    /// 4. Swaps the directories so the optimized storage takes over.
+    pub fn optimize_compression<R: Rng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> OperationResult<()> {
+        if self.storage.compression() != Compression::LZ4 {
+            return Ok(());
+        }
+
+        let hw_counter = HardwareCounterCell::disposable();
+
+        // --- 1. Sample payloads and build dictionary --------------------------------
+        let max_offset = self.storage.max_point_offset();
+        if max_offset == 0 {
+            return Ok(());
+        }
+
+        let sample_count = Self::DICT_SAMPLE_SIZE.min(max_offset as usize);
+        let indices = sample_indices(rng, max_offset as usize, sample_count);
+
+        let mut samples: Vec<Vec<u8>> = Vec::with_capacity(sample_count);
+        for idx in indices {
+            if let Some(payload) = self
+                .storage
+                .get_value::<false>(idx as PointOffsetType, &hw_counter)?
+            {
+                samples.push(payload.to_bytes());
+            }
+        }
+
+        let dictionary = build_dictionary(samples.iter().map(|s| s.as_slice()));
+
+        // --- 2. Create new storage with LZ4Dict in a tmp directory ------------------
+        let base_path = self.storage.base_path().to_path_buf();
+        let tmp_path = base_path.with_extension("lz4dict_tmp");
+
+        // Clean up leftover tmp dir from a previous interrupted attempt
+        if tmp_path.exists() {
+            fs::remove_dir_all(&tmp_path)?;
+        }
+        fs::create_dir_all(&tmp_path)?;
+
+        Gridstore::<Payload>::write_dictionary(&tmp_path, &dictionary)?;
+
+        let options = StorageOptions {
+            compression: Some(Compression::LZ4Dict),
+            ..StorageOptions::default()
+        };
+        let mut new_storage = Gridstore::<Payload>::new(tmp_path.clone(), options)?;
+
+        // --- 3. Rewrite all payloads ------------------------------------------------
+        self.storage.iter(
+            |point_id, payload: Payload| -> OperationResult<bool> {
+                new_storage.put_value(
+                    point_id,
+                    &payload,
+                    hw_counter.ref_payload_io_write_counter(),
+                )?;
+                Ok(true)
+            },
+            hw_counter.ref_payload_io_read_counter(),
+        )?;
+
+        new_storage.flusher()().map_err(|e| {
+            OperationError::service_error(format!("Failed to flush new storage: {e}"))
+        })?;
+
+        // --- 4. Swap directories ----------------------------------------------------
+        let old_path = base_path.with_extension("lz4_old");
+        if old_path.exists() {
+            fs::remove_dir_all(&old_path)?;
+        }
+
+        // old storage must be dropped before renaming its directory
+        drop(std::mem::replace(
+            &mut self.storage,
+            new_storage,
+        ));
+
+        // base_path -> old_path, tmp_path -> base_path
+        fs::rename(&base_path, &old_path)?;
+        fs::rename(&tmp_path, &base_path)?;
+        fs::remove_dir_all(&old_path)?;
+
+        // Reopen from the final location
+        self.storage = Gridstore::open(base_path).map_err(|err| {
+            OperationError::service_error(format!(
+                "Failed to reopen optimized payload storage: {err}"
+            ))
+        })?;
+
+        if self.populate {
+            self.storage.populate()?;
+        }
+
         Ok(())
     }
 }

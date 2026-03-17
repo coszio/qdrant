@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
+use rand::Rng;
 use serde_json::Value;
 
 use crate::common::Flusher;
@@ -288,6 +289,26 @@ impl PayloadStorageEnum {
             #[cfg(feature = "rocksdb")]
             PayloadStorageEnum::OnDiskPayloadStorage(_) => {}
             PayloadStorageEnum::MmapPayloadStorage(s) => s.populate()?,
+        }
+        Ok(())
+    }
+
+    /// Optimize the internal compression of the payload storage.
+    ///
+    /// For mmap storage this trains a dictionary and rewrites data with LZ4Dict.
+    /// For other backends this is a no-op.
+    pub fn optimize_payload_storage<R: Rng + ?Sized>(
+        &mut self,
+        rng: &mut R,
+    ) -> OperationResult<()> {
+        match self {
+            #[cfg(feature = "testing")]
+            PayloadStorageEnum::InMemoryPayloadStorage(_) => {}
+            #[cfg(feature = "rocksdb")]
+            PayloadStorageEnum::SimplePayloadStorage(_) => {}
+            #[cfg(feature = "rocksdb")]
+            PayloadStorageEnum::OnDiskPayloadStorage(_) => {}
+            PayloadStorageEnum::MmapPayloadStorage(s) => s.optimize_compression(rng)?,
         }
         Ok(())
     }

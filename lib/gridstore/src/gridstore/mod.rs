@@ -501,6 +501,16 @@ impl<V: Blob> Gridstore<V> {
 }
 
 impl<V> Gridstore<V> {
+    /// Returns the compression method used by this storage.
+    pub fn compression(&self) -> Compression {
+        self.config.compression
+    }
+
+    /// Returns the base path of this storage.
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
+    }
+
     fn next_page_id(&self) -> PageId {
         self.pages.read().num_pages() as PageId
     }
