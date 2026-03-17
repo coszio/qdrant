@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use common::counter::hardware_counter::HardwareCounterCell;
 use common::types::PointOffsetType;
 use fs_err as fs;
-use gridstore::config::{Compression, StorageOptions};
+use gridstore::config::StorageOptions;
 use gridstore::{Blob, Gridstore};
 use serde_json::Value;
 
@@ -33,38 +33,15 @@ pub struct MmapPayloadStorage {
 
 impl MmapPayloadStorage {
     pub fn open_or_create(path: PathBuf, populate: bool) -> OperationResult<Self> {
-        Self::open_or_create_with_dictionary(path, populate, None)
-    }
-
-    /// Create or open payload storage with an optional compression dictionary.
-    ///
-    /// When `dictionary` is provided and the storage does not yet exist, the dictionary
-    /// is written to disk and `LZ4Dict` compression is used. When opening an existing
-    /// storage, the dictionary parameter is ignored (it is loaded from disk by gridstore).
-    pub fn open_or_create_with_dictionary(
-        path: PathBuf,
-        populate: bool,
-        dictionary: Option<&[u8]>,
-    ) -> OperationResult<Self> {
         let path = storage_dir(path);
         if path.exists() {
             Self::open(path, populate)
         } else {
+            // create folder if it does not exist
             fs::create_dir_all(&path).map_err(|_| {
                 OperationError::service_error("Failed to create mmap payload storage directory")
             })?;
-
-            if let Some(dict) = dictionary {
-                Gridstore::<Payload>::write_dictionary(&path, dict)?;
-            }
-
-            let compression = if dictionary.is_some() {
-                Compression::LZ4Dict
-            } else {
-                Compression::default()
-            };
-
-            Self::new(path, populate, compression)
+            Ok(Self::new(path, populate)?)
         }
     }
 
@@ -80,12 +57,8 @@ impl MmapPayloadStorage {
         Ok(Self { storage, populate })
     }
 
-    fn new(path: PathBuf, populate: bool, compression: Compression) -> OperationResult<Self> {
-        let options = StorageOptions {
-            compression: Some(compression),
-            ..StorageOptions::default()
-        };
-        let storage = Gridstore::new(path, options)?;
+    fn new(path: PathBuf, populate: bool) -> OperationResult<Self> {
+        let storage = Gridstore::new(path, StorageOptions::default())?;
 
         if populate {
             storage.populate()?;
