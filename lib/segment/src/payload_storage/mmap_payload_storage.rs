@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use common::counter::hardware_counter::HardwareCounterCell;
@@ -88,6 +89,9 @@ impl MmapPayloadStorage {
     /// LZ4 only uses the last 64KB of the dictionary for matching.
     const MAX_DICT_SIZE: usize = 64 * 1024;
 
+    /// Number of most-frequent string values to embed in the dictionary.
+    const TOP_STRING_COUNT: usize = 100;
+
     /// Optimize compression by switching from plain LZ4 to LZ4 with a trained dictionary.
     ///
     /// This is a no-op when the storage already uses `LZ4Dict` (or `None`).
@@ -117,6 +121,7 @@ impl MmapPayloadStorage {
         let indices = sample_indices(rng, max_offset as usize, sample_count);
 
         let mut schema = Value::Object(Map::new());
+        let mut string_counts: HashMap<String, usize> = HashMap::new();
         for idx in indices.iter() {
             if let Some(payload) = self
                 .storage
@@ -124,9 +129,24 @@ impl MmapPayloadStorage {
                 .ok()
                 .flatten()
             {
-                merge_into_schema(&mut schema, &Value::Object(payload.0));
+                let value = Value::Object(payload.0);
+                collect_strings(&value, &mut string_counts);
+                merge_into_schema(&mut schema, &value);
             }
         }
+
+        // Inject the top 100 most frequent string values into the schema so LZ4
+        // can match against common payload values, not just keys.
+        let top_strings = top_n_strings(&string_counts, Self::TOP_STRING_COUNT);
+        if !top_strings.is_empty() {
+            if let Value::Object(map) = &mut schema {
+                map.insert(
+                    String::new(),
+                    Value::Array(top_strings.into_iter().map(Value::String).collect()),
+                );
+            }
+        }
+
         let mut dictionary = serde_json::to_vec(&schema).unwrap_or_default();
         // LZ4 only uses the last 64KB of the dictionary for matching.
         dictionary.truncate(Self::MAX_DICT_SIZE);
@@ -411,4 +431,31 @@ fn default_value(value: &Value) -> Value {
             Value::Object(new_map)
         }
     }
+}
+
+/// Recursively collect all string values from a JSON value into a frequency map.
+fn collect_strings(value: &Value, counts: &mut HashMap<String, usize>) {
+    match value {
+        Value::String(s) => {
+            *counts.entry(s.clone()).or_default() += 1;
+        }
+        Value::Array(arr) => {
+            for elem in arr {
+                collect_strings(elem, counts);
+            }
+        }
+        Value::Object(map) => {
+            for v in map.values() {
+                collect_strings(v, counts);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Return the top `n` most frequent strings, sorted by descending frequency.
+fn top_n_strings(counts: &HashMap<String, usize>, n: usize) -> Vec<String> {
+    let mut entries: Vec<_> = counts.iter().collect();
+    entries.sort_unstable_by(|a, b| b.1.cmp(a.1));
+    entries.into_iter().take(n).map(|(s, _)| s.clone()).collect()
 }
