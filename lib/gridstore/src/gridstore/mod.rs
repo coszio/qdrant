@@ -114,7 +114,7 @@ impl<V: Blob> Gridstore<V> {
                     "Failed to create gridstore storage directory: {err}"
                 ))
             })?;
-            Self::new(base_path, create_options)
+            Self::new(base_path, create_options, None)
         }
     }
 
@@ -122,17 +122,23 @@ impl<V: Blob> Gridstore<V> {
     ///
     /// `base_path` is the directory where the storage files will be stored.
     /// It should exist already.
-    pub fn new(base_path: PathBuf, options: StorageOptions) -> Result<Self> {
-        let dictionary = options.dictionary.clone();
-        let config = StorageConfig::try_from(options).map_err(GridstoreError::service_error)?;
+    ///
+    /// If `dictionary` is provided, the compression is set to `LZ4Dict` regardless of the
+    /// `options.compression` setting, and the dictionary is persisted to `dict.bin`.
+    pub fn new(
+        base_path: PathBuf,
+        options: StorageOptions,
+        dictionary: Option<Arc<Vec<u8>>>,
+    ) -> Result<Self> {
+        let mut config =
+            StorageConfig::try_from(options).map_err(GridstoreError::service_error)?;
         let config_path = base_path.join(CONFIG_FILENAME);
 
-        // Persist dictionary to disk if provided.
+        // Override compression to LZ4Dict and persist dictionary to disk if provided.
         if let Some(ref dict) = dictionary {
+            config.compression = Compression::LZ4Dict;
             fs::write(dict_path(&base_path), dict.as_slice()).map_err(|err| {
-                GridstoreError::service_error(format!(
-                    "Failed to write dictionary file: {err}"
-                ))
+                GridstoreError::service_error(format!("Failed to write dictionary file: {err}"))
             })?;
         }
 
@@ -363,8 +369,8 @@ impl<V: Blob> Gridstore<V> {
     ///
     /// Completely wipes the storage, and recreates it with a single empty page.
     pub fn clear(&mut self) -> Result<()> {
-        let mut create_options = StorageOptions::from(&self.config);
-        create_options.dictionary = self.dictionary.clone();
+        let create_options = StorageOptions::from(&self.config);
+        let dictionary = self.dictionary.clone();
         let base_path = self.base_path.clone();
 
         self.is_alive_flush_lock.blocking_mark_dead();
@@ -381,7 +387,7 @@ impl<V: Blob> Gridstore<V> {
                 "Failed to create gridstore storage directory: {err}"
             ))
         })?;
-        *self = Self::new(base_path, create_options)?;
+        *self = Self::new(base_path, create_options, dictionary)?;
 
         Ok(())
     }

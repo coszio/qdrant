@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 
 /// Expect JSON values to have roughly 3–5 fields with mostly small values.
@@ -46,10 +44,6 @@ pub struct StorageOptions {
     ///
     /// Default is LZ4
     pub compression: Option<Compression>,
-
-    /// Optional dictionary for LZ4Dict compression.
-    /// When provided, compression is automatically set to LZ4Dict.
-    pub dictionary: Option<Arc<Vec<u8>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,17 +103,11 @@ impl TryFrom<StorageOptions> for StorageConfig {
             return Err("Page size must be a multiple of (block size * region size)");
         }
 
-        let compression = if options.dictionary.is_some() {
-            Compression::LZ4Dict
-        } else {
-            options.compression.unwrap_or_default()
-        };
-
         Ok(Self {
             page_size_bytes,
             block_size_bytes,
             region_size_blocks,
-            compression,
+            compression: options.compression.unwrap_or_default(),
         })
     }
 }
@@ -131,8 +119,6 @@ impl From<&StorageConfig> for StorageOptions {
             block_size_bytes: Some(config.block_size_bytes),
             region_size_blocks: Some(config.region_size_blocks as u16),
             compression: Some(config.compression),
-            // Dictionary is not reconstructed from config; it must be loaded from disk separately.
-            dictionary: None,
         }
     }
 }

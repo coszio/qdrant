@@ -71,11 +71,7 @@ impl MmapPayloadStorage {
         populate: bool,
         dictionary: Option<Arc<Vec<u8>>>,
     ) -> OperationResult<Self> {
-        let options = StorageOptions {
-            dictionary,
-            ..StorageOptions::default()
-        };
-        let storage = Gridstore::new(path, options)?;
+        let storage = Gridstore::new(path, StorageOptions::default(), dictionary)?;
 
         if populate {
             storage.populate()?;

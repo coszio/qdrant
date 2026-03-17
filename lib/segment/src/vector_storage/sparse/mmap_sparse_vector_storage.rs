@@ -93,7 +93,7 @@ impl MmapSparseVectorStorage {
             ..Default::default()
         };
 
-        let storage = Gridstore::new(storage_dir, storage_config).map_err(|err| {
+        let storage = Gridstore::new(storage_dir, storage_config, None).map_err(|err| {
             OperationError::service_error(format!(
                 "Failed to create storage for mmap sparse vectors: {err}"
             ))
