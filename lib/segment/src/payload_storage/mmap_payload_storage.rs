@@ -94,7 +94,7 @@ impl MmapPayloadStorage {
     /// 2. Creates a secondary storage with `LZ4Dict` in a temporary directory.
     /// 3. Rewrites every payload into the new storage.
     /// 4. Swaps the directories so the optimized storage takes over.
-    pub fn optimize_compression<R: Rng + ?Sized>(
+    pub fn optimize<R: Rng + ?Sized>(
         &mut self,
         rng: &mut R,
     ) -> OperationResult<()> {
@@ -127,13 +127,8 @@ impl MmapPayloadStorage {
 
         // --- 2. Create new storage with LZ4Dict in a tmp directory ------------------
         let base_path = self.storage.base_path().to_path_buf();
-        let tmp_path = base_path.with_extension("lz4dict_tmp");
-
-        // Clean up leftover tmp dir from a previous interrupted attempt
-        if tmp_path.exists() {
-            fs::remove_dir_all(&tmp_path)?;
-        }
-        fs::create_dir_all(&tmp_path)?;
+        let tmp_dir = tempfile::tempdir_in(base_path.parent().unwrap_or(Path::new(".")))?;
+        let tmp_path = tmp_dir.path().to_path_buf();
 
         Gridstore::<Payload>::write_dictionary(&tmp_path, &dictionary)?;
 

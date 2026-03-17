@@ -517,8 +517,7 @@ impl SegmentBuilder {
 
             let appendable_flag = segment_config.is_appendable();
 
-            payload_storage.flusher()()?;
-            payload_storage.optimize_payload_storage(rng)?;
+            payload_storage.optimize(rng)?;
             let payload_storage_arc = Arc::new(AtomicRefCell::new(payload_storage));
 
             let id_tracker = match id_tracker {

@@ -297,7 +297,7 @@ impl PayloadStorageEnum {
     ///
     /// For mmap storage this trains a dictionary and rewrites data with LZ4Dict.
     /// For other backends this is a no-op.
-    pub fn optimize_payload_storage<R: Rng + ?Sized>(
+    pub fn optimize<R: Rng + ?Sized>(
         &mut self,
         rng: &mut R,
     ) -> OperationResult<()> {
@@ -308,7 +308,7 @@ impl PayloadStorageEnum {
             PayloadStorageEnum::SimplePayloadStorage(_) => {}
             #[cfg(feature = "rocksdb")]
             PayloadStorageEnum::OnDiskPayloadStorage(_) => {}
-            PayloadStorageEnum::MmapPayloadStorage(s) => s.optimize_compression(rng)?,
+            PayloadStorageEnum::MmapPayloadStorage(s) => s.optimize(rng)?,
         }
         Ok(())
     }
